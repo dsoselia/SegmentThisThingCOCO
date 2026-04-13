@@ -1,0 +1,69 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "stt_ring"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_h100_single_tune_mb512_nw16",
+    "profile_name": "h100_single_tune_mb512_nw16",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 10,
+    "num_interop_threads": 4,
+    "distributed": false,
+    "backend": "nccl",
+    "micro_batch_size": 512,
+    "num_workers": 16,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 120,
+    "save_every": 10,
+    "log_every": 1,
+    "eval_every": null,
+    "resume_from": null,
+    "checkpoint_keep_last": 2,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "segment-this-thing",
+    "wandb_mode": "offline",
+    "wandb_tags": ["stt", "segmentation", "h100", "probe", "nw16", "offline"],
+    "num_steps": 10
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_train.jsonl",
+    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/stt-b-qbkbmb5qsb4q2.pth",
+    "lr": 1.0e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 200,
+    "margin": 256,
+    "max_segments_per_image": 16,
+    "effective_batch_size": 512,
+    "target_batch_schedule": {
+      "0": 512
+    }
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl"
+    },
+    "max_examples": 64,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  },
+  "assumptions": [
+    "512-batch probe with 16 workers on the current H100 node.",
+    "Use to test whether the 22-thread host still gains from more loader workers at the highest working batch."
+  ]
+}

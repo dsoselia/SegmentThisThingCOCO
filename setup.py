@@ -10,6 +10,6 @@ setup(
     name="segment_this_thing",
     version="1.0",
     description="An implementation of the Segment This Thing model from the CVPR 2025 paper",
-    install_requires=[],
+    install_requires=["numpy", "Pillow", "torch"],
     packages=find_packages(),
 )

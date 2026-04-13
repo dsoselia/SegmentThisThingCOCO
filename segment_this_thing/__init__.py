@@ -4,7 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .foveation import Foveator
+from .foveation import Foveator, LogRectilinearFoveator
 from .model import (
     build_segment_this_thing_b,
     build_segment_this_thing_h,

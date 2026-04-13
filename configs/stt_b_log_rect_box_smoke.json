@@ -1,0 +1,50 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "log_rect_box",
+    "log_rect_axis_bins": 13,
+    "log_rect_exponent": 4.0,
+    "log_rect_center_width": 16
+  },
+  "runtime": {
+    "output_dir": "runs/stt_log_rect_box",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "micro_batch_size": 1,
+    "num_workers": 0,
+    "save_every": 5,
+    "log_every": 1,
+    "num_steps": 5
+  },
+  "mae": {
+    "enabled": true,
+    "train_manifest": "manifests/train_smoke.jsonl",
+    "views_per_image": 1,
+    "target_batch_schedule": {
+      "0": 1
+    }
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "manifests/train_smoke.jsonl",
+    "effective_batch_size": 1,
+    "target_batch_schedule": {
+      "0": 1
+    }
+  },
+  "evaluation": {
+    "eval_manifest": "manifests/eval_smoke.jsonl",
+    "max_examples": 2
+  },
+  "benchmark": {
+    "enabled": true,
+    "measure_steps": 3,
+    "warmup_steps": 1,
+    "image_size": 1536
+  },
+  "assumptions": [
+    "The log-rectilinear prototype targets a token budget close to STT-B by using a 13x13 box grid.",
+    "This smoke config validates interface compatibility rather than quality."
+  ]
+}

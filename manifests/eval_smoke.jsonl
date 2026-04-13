@@ -1,0 +1,2 @@
+{"image_path": "/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/smoke_data/eval_0.png", "dataset_name": "smoke", "segments": [{"mask_path": "/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/smoke_data/eval_0_mask.png"}]}
+{"image_path": "/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/smoke_data/eval_1.png", "dataset_name": "smoke", "segments": [{"mask_path": "/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/smoke_data/eval_1_mask.png"}]}

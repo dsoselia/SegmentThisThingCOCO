@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from itertools import islice
 from typing import List
 
@@ -31,6 +34,36 @@ def compute_integral_image(image: torch.Tensor):
 def generate_grid_coords_2d(grid_size):
     x = torch.arange(grid_size)
     return torch.stack(torch.meshgrid(x, x, indexing="xy"), dim=-1)
+
+
+def _compute_rect_integral_mean(
+    integral_image: torch.Tensor,
+    lower_pixel_coords: torch.Tensor,
+    upper_pixel_coords: torch.Tensor,
+    area: torch.Tensor,
+) -> torch.Tensor:
+    return (
+        torch.stack(
+            [
+                integral_image_channel[
+                    upper_pixel_coords[..., 1], upper_pixel_coords[..., 0]
+                ]
+                - integral_image_channel[
+                    upper_pixel_coords[..., 1], lower_pixel_coords[..., 0]
+                ]
+                - integral_image_channel[
+                    lower_pixel_coords[..., 1], upper_pixel_coords[..., 0]
+                ]
+                + integral_image_channel[
+                    lower_pixel_coords[..., 1], lower_pixel_coords[..., 0]
+                ]
+                for integral_image_channel in integral_image
+            ],
+            1,
+        )
+        .floor_divide(area.view(-1, 1, *area.shape[-2:]).int())
+        .byte()
+    )
 
 
 class Foveator(torch.nn.Module):
@@ -189,27 +222,11 @@ class Foveator(torch.nn.Module):
         ).unsqueeze(0).to(device)
         upper_pixel_coords = lower_pixel_coords + self.token_strides.view(-1, 1, 1, 1)
 
-        return (
-            torch.stack(
-                [
-                    integral_image_channel[
-                        upper_pixel_coords[..., 1], upper_pixel_coords[..., 0]
-                    ]
-                    - integral_image_channel[
-                        upper_pixel_coords[..., 1], lower_pixel_coords[..., 0]
-                    ]
-                    - integral_image_channel[
-                        lower_pixel_coords[..., 1], upper_pixel_coords[..., 0]
-                    ]
-                    + integral_image_channel[
-                        lower_pixel_coords[..., 1], lower_pixel_coords[..., 0]
-                    ]
-                    for integral_image_channel in integral_image
-                ],
-                1,
-            )
-            .floor_divide(self.token_strides.square().view(-1, 1, 1, 1).int())
-            .byte()
+        return _compute_rect_integral_mean(
+            integral_image,
+            lower_pixel_coords,
+            upper_pixel_coords,
+            self.token_strides.square().view(-1, 1, 1),
         )
 
     def get_in_bounds_tokens(
@@ -351,3 +368,178 @@ class Foveator(torch.nn.Module):
                     i += ring_thickness
 
         return reconstructed_image
+
+
+def _strictly_increasing_ints(values: list[float], lower: int, upper: int) -> list[int]:
+    ints = [int(round(v)) for v in values]
+    ints[0] = max(lower, ints[0])
+    for index in range(1, len(ints)):
+        ints[index] = max(ints[index], ints[index - 1] + 1)
+    ints[-1] = min(upper, ints[-1])
+    for index in range(len(ints) - 2, -1, -1):
+        ints[index] = min(ints[index], ints[index + 1] - 1)
+    return ints
+
+
+def _subdivide_boxes(token_boxes: torch.Tensor, token_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    lower = torch.empty((token_boxes.shape[0], token_size, token_size, 2), dtype=torch.int64)
+    upper = torch.empty_like(lower)
+
+    for token_index, (x0, y0, x1, y1) in enumerate(token_boxes.tolist()):
+        x_edges = [x0 + (x1 - x0) * i / token_size for i in range(token_size + 1)]
+        y_edges = [y0 + (y1 - y0) * i / token_size for i in range(token_size + 1)]
+        x_edges = _strictly_increasing_ints(x_edges, x0, x1)
+        y_edges = _strictly_increasing_ints(y_edges, y0, y1)
+        for row in range(token_size):
+            for col in range(token_size):
+                lower[token_index, row, col, 0] = x_edges[col]
+                lower[token_index, row, col, 1] = y_edges[row]
+                upper[token_index, row, col, 0] = x_edges[col + 1]
+                upper[token_index, row, col, 1] = y_edges[row + 1]
+
+    return lower, upper
+
+
+class LogRectilinearFoveator(torch.nn.Module):
+    """
+    Box-based foveator derived from the log-rectilinear transformation.
+
+    Each token owns an explicit axis-aligned rectangular box in the prompt-centered crop.
+    The box is subdivided into token_size x token_size bins and each bin is averaged from an
+    integral image. This preserves the STT model interface while changing only the tokenizer.
+    """
+
+    def __init__(
+        self,
+        token_size: int,
+        pattern_size: int,
+        axis_bins: int,
+        exponent: float = 4.0,
+        center_width: int | None = None,
+    ) -> None:
+        super().__init__()
+        if axis_bins < 3 or axis_bins % 2 == 0:
+            raise ValueError("[LogRectilinearFoveator]: axis_bins must be an odd integer >= 3.")
+        if pattern_size <= 0 or pattern_size % 2 != 0:
+            raise ValueError("[LogRectilinearFoveator]: pattern_size must be a positive even integer.")
+
+        self.token_size = token_size
+        self.pattern_size = pattern_size
+        self.axis_bins = axis_bins
+        self.exponent = exponent
+        self.center_width = center_width or token_size
+
+        edges = self._build_axis_edges()
+        token_boxes = []
+        for y0, y1 in zip(edges[:-1], edges[1:]):
+            for x0, x1 in zip(edges[:-1], edges[1:]):
+                token_boxes.append([x0, y0, x1, y1])
+
+        token_boxes_tensor = torch.tensor(token_boxes, dtype=torch.int64)
+        bin_lower, bin_upper = _subdivide_boxes(token_boxes_tensor, token_size)
+        bin_area = ((bin_upper - bin_lower).prod(dim=-1)).clamp(min=1)
+
+        self.register_buffer("token_boxes", token_boxes_tensor, persistent=False)
+        self.register_buffer("bin_lower_pixel_coords", bin_lower, persistent=False)
+        self.register_buffer("bin_upper_pixel_coords", bin_upper, persistent=False)
+        self.register_buffer("bin_area", bin_area, persistent=False)
+
+    def _scaled_log_rect(self, t: float) -> float:
+        linear = t
+        nonlinear = (math.exp(t**self.exponent) - 1.0) / (math.e - 1.0)
+        return max(linear, nonlinear)
+
+    def _build_axis_edges(self) -> list[int]:
+        radius = self.pattern_size // 2
+        center = radius
+        side_bins = (self.axis_bins - 1) // 2
+        half_center = self.center_width // 2
+
+        if half_center < 1 or half_center >= radius:
+            raise ValueError("[LogRectilinearFoveator]: center_width must be in [2, pattern_size).")
+
+        distances = [half_center]
+        for index in range(1, side_bins):
+            t = index / side_bins
+            offset = half_center + (radius - half_center) * self._scaled_log_rect(t)
+            distances.append(offset)
+        distances.append(radius)
+        distances = _strictly_increasing_ints(distances, half_center, radius)
+
+        edges = [0]
+        edges.extend(center - distance for distance in reversed(distances[:-1]))
+        edges.append(center + distances[0])
+        edges.extend(center + distance for distance in distances[1:-1])
+        edges.append(self.pattern_size)
+        return _strictly_increasing_ints(edges, 0, self.pattern_size)
+
+    def get_pattern_bounds_size(self) -> int:
+        return self.pattern_size
+
+    def get_num_tokens(self) -> int:
+        return len(self.token_boxes)
+
+    def extract_foveated_image(self, images: torch.Tensor) -> torch.Tensor:
+        if images.ndim != 3:
+            raise ValueError("[LogRectilinearFoveator.extract_foveated_image]: Expected 3D input Tensor.")
+        if images.shape[-2] != self.pattern_size or images.shape[-1] != self.pattern_size:
+            raise ValueError(
+                f"[LogRectilinearFoveator.extract_foveated_image]: Expected square image of size {self.pattern_size}"
+            )
+        if images.shape[-3] != 3:
+            raise ValueError("[LogRectilinearFoveator.extract_foveated_image]: Expected 3-channel image.")
+        if images.dtype != torch.uint8:
+            raise ValueError("[LogRectilinearFoveator.extract_foveated_image]: Expected byte images.")
+
+        integral_image = compute_integral_image(images)
+        return _compute_rect_integral_mean(
+            integral_image,
+            self.bin_lower_pixel_coords.to(images.device),
+            self.bin_upper_pixel_coords.to(images.device),
+            self.bin_area.to(images.device),
+        )
+
+    def get_in_bounds_tokens(
+        self,
+        image_size: torch.Tensor,
+        crop_bounds: torch.Tensor,
+        in_bounds_threshold: float = 0.0,
+    ) -> torch.Tensor:
+        box_coords = self.token_boxes.to(crop_bounds.device)
+        lower = crop_bounds[0] + box_coords[:, :2]
+        upper = crop_bounds[0] + box_coords[:, 2:]
+        bounded_lower = lower.clamp(min=0)
+        bounded_upper = torch.minimum(upper, image_size)
+        in_bounds_area = ((bounded_upper - bounded_lower).clamp(min=0).prod(dim=-1)).float()
+        total_area = ((box_coords[:, 2:] - box_coords[:, :2]).prod(dim=-1)).float()
+        return (in_bounds_area / total_area.clamp(min=1.0)) > in_bounds_threshold
+
+    def generate_foveated_visualization(self, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.ndim != 4:
+            raise ValueError(
+                "[LogRectilinearFoveator.generate_foveated_visualization]: Expected 4D input Tensor (N, C, H, W)."
+            )
+        if tokens.shape[0] != self.get_num_tokens():
+            raise ValueError(
+                f"[LogRectilinearFoveator.generate_foveated_visualization]: Expected {self.get_num_tokens()} tokens"
+            )
+        if tokens.shape[-2] != self.token_size or tokens.shape[-1] != self.token_size:
+            raise ValueError(
+                f"[LogRectilinearFoveator.generate_foveated_visualization]: Expected square tokens of size {self.token_size}"
+            )
+
+        output = torch.zeros((tokens.shape[1], self.pattern_size, self.pattern_size), dtype=tokens.dtype)
+        lower = self.bin_lower_pixel_coords.cpu()
+        upper = self.bin_upper_pixel_coords.cpu()
+        source = tokens.cpu()
+
+        for token_index in range(source.shape[0]):
+            for row in range(self.token_size):
+                for col in range(self.token_size):
+                    x0 = lower[token_index, row, col, 0].item()
+                    y0 = lower[token_index, row, col, 1].item()
+                    x1 = upper[token_index, row, col, 0].item()
+                    y1 = upper[token_index, row, col, 1].item()
+                    output[:, y0:y1, x0:x1] = source[token_index, :, row, col].view(-1, 1, 1)
+
+        return output

@@ -1,0 +1,42 @@
+{
+  "model": {
+    "size": "b"
+  },
+  "runtime": {
+    "output_dir": "runs/stt",
+    "seed": 1337,
+    "device": "cpu",
+    "amp_dtype": "bfloat16",
+    "distributed": false,
+    "backend": "nccl",
+    "micro_batch_size": 1,
+    "num_workers": 0,
+    "pin_memory": false,
+    "persistent_workers": false,
+    "prefetch_factor": 2,
+    "save_every": 1,
+    "log_every": 1,
+    "eval_every": 2,
+    "resume_from": "runs/stt/seg_20260409T175056Z/checkpoints/checkpoint_step_0000004.pt",
+    "checkpoint_keep_last": 2,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "num_steps": 7
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "manifests/train_smoke.jsonl",
+    "effective_batch_size": 1,
+    "target_batch_schedule": {
+      "0": 1
+    }
+  },
+  "evaluation": {
+    "eval_manifest": "manifests/eval_smoke.jsonl",
+    "named_eval_manifests": {
+      "sa1b_proxy": "manifests/eval_smoke.jsonl"
+    },
+    "max_examples": 2
+  }
+}

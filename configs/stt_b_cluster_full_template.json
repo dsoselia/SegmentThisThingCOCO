@@ -1,0 +1,80 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "stt_ring"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_full",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 4,
+    "num_workers": 16,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "save_every": 1000,
+    "log_every": 20,
+    "eval_every": 1000,
+    "resume_from": null,
+    "checkpoint_keep_last": 2,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "num_steps": 500000
+  },
+  "mae": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_train.jsonl",
+    "lr": 0.0001220703125,
+    "weight_decay": 0.001,
+    "warmup_steps": 10000,
+    "mask_ratio": 0.75,
+    "margin": 256,
+    "views_per_image": 2,
+    "effective_batch_size": 1024,
+    "target_batch_schedule": {
+      "0": 1024,
+      "100000": 2048,
+      "200000": 4096,
+      "300000": 8192,
+      "400000": 16384
+    }
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_train.jsonl",
+    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_full/mae/final_encoder.pt",
+    "init_checkpoint": null,
+    "lr": 1.52587890625e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 5000,
+    "margin": 256,
+    "max_segments_per_image": 16,
+    "sample_multiple_segments_per_image": true,
+    "effective_batch_size": 2048,
+    "target_batch_schedule": {
+      "0": 2048,
+      "50000": 4096,
+      "100000": 8192,
+      "150000": 16384,
+      "200000": 32768
+    }
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl",
+      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl",
+      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl"
+    },
+    "max_examples": null,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  },
+  "assumptions": [
+    "Tune micro_batch_size and num_workers against the actual 2-8 H100 allocation before launching.",
+    "Use the staged subset as the engineering stand-in until full storage arrives."
+  ]
+}

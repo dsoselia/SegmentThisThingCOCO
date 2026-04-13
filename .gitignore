@@ -1,1 +1,5 @@
 segment_this_thing.egg-info
+.DS_Store
+._*
+__pycache__/
+runs/

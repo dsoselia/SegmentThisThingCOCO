@@ -1,0 +1,83 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "stt_ring"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_paper_seg",
+    "profile_name": "subset_paper_seg",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 4,
+    "num_interop_threads": 2,
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 2,
+    "num_workers": 4,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 120,
+    "save_every": 5000,
+    "log_every": 50,
+    "eval_every": 5000,
+    "resume_from": null,
+    "checkpoint_keep_last": 2,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "segment-this-thing",
+    "wandb_mode": "offline",
+    "wandb_tags": ["stt", "segmentation", "paper", "offline"],
+    "num_steps": 250000
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_train.jsonl",
+    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_paper_mae/final_encoder.pt",
+    "init_checkpoint": null,
+    "lr": 1.52587890625e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 5000,
+    "margin": 256,
+    "max_segments_per_image": 16,
+    "sample_multiple_segments_per_image": true,
+    "effective_batch_size": 2048,
+    "target_batch_schedule": {
+      "0": 2048,
+      "50000": 4096,
+      "100000": 8192,
+      "150000": 16384,
+      "200000": 32768
+    },
+    "focal_weight": 20.0,
+    "dice_weight": 1.0,
+    "iou_weight": 0.01,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "prompt_noise_std": 0.0
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl",
+      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl",
+      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl"
+    },
+    "max_examples": null,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  },
+  "assumptions": [
+    "Paper-faithful segmentation schedule for STT-B using the staged SA-1B subset as the temporary stand-in for full SA-1B.",
+    "This run initializes from the MAE encoder only and does not use the released STT-B segmentation checkpoint."
+  ]
+}

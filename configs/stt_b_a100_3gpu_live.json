@@ -1,0 +1,71 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "stt_ring"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_a100_3gpu_live",
+    "profile_name": "a100_3gpu_live",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 2,
+    "num_interop_threads": 1,
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 128,
+    "num_workers": 4,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 600,
+    "save_every": 500,
+    "log_every": 5,
+    "eval_every": 500,
+    "resume_from": null,
+    "checkpoint_keep_last": 4,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "segment-this-thing",
+    "wandb_mode": "offline",
+    "wandb_tags": ["stt", "segmentation", "a100", "3gpu", "live", "offline"],
+    "num_steps": 10000
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_train.jsonl",
+    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/stt-b-qbkbmb5qsb4q2.pth",
+    "lr": 1.0e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 200,
+    "margin": 256,
+    "max_segments_per_image": 16,
+    "effective_batch_size": 384,
+    "target_batch_schedule": {
+      "0": 384
+    }
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl",
+      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl",
+      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl"
+    },
+    "max_examples": 128,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  },
+  "assumptions": [
+    "Direct-node 3x A100 live run using the best measured operating point.",
+    "Checkpoint and eval cadence retained at 500 steps to observe long-run behavior without waiting for a Slurm cycle."
+  ]
+}
