@@ -1,0 +1,77 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "stt_ring"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_coco_paper_seg_2xa100_quick",
+    "profile_name": "coco_paper_seg_2xa100_quick",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 2,
+    "num_interop_threads": 1,
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 2,
+    "num_workers": 4,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 600,
+    "save_every": 50,
+    "log_every": 10,
+    "eval_every": 50,
+    "resume_from": null,
+    "checkpoint_keep_last": 2,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "segment-this-thing",
+    "wandb_mode": "offline",
+    "wandb_tags": ["stt", "segmentation", "coco", "paper", "quick", "2xa100", "offline"],
+    "num_steps": 100
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_train_instances.jsonl",
+    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_2xa100_quick_final_encoder.pt",
+    "init_checkpoint": null,
+    "lr": 1.52587890625e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 20,
+    "margin": 256,
+    "max_segments_per_image": 8,
+    "sample_multiple_segments_per_image": true,
+    "effective_batch_size": 2048,
+    "target_batch_schedule": {
+      "0": 2048
+    },
+    "focal_weight": 20.0,
+    "dice_weight": 1.0,
+    "iou_weight": 0.01,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "prompt_noise_std": 0.0
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "coco2017_val": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_val_instances.jsonl"
+    },
+    "max_examples": 128,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  },
+  "assumptions": [
+    "Quick interactive segmentation bring-up on COCO 2017 using 2x A100.",
+    "Loads only the encoder exported from the quick COCO MAE run."
+  ]
+}
