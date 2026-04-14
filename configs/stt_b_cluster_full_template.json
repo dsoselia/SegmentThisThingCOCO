@@ -4,7 +4,7 @@
     "tokenizer_type": "stt_ring"
   },
   "runtime": {
-    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_full",
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_full",
     "seed": 1337,
     "device": "cuda",
     "amp_dtype": "bfloat16",
@@ -27,7 +27,7 @@
   },
   "mae": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_train.jsonl",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_train.jsonl",
     "lr": 0.0001220703125,
     "weight_decay": 0.001,
     "warmup_steps": 10000,
@@ -45,8 +45,8 @@
   },
   "segmentation": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_train.jsonl",
-    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_full/mae/final_encoder.pt",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_train.jsonl",
+    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_full/mae/final_encoder.pt",
     "init_checkpoint": null,
     "lr": 1.52587890625e-05,
     "weight_decay": 0.001,
@@ -65,9 +65,9 @@
   },
   "evaluation": {
     "named_eval_manifests": {
-      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl",
-      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl",
-      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl"
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_val.jsonl",
+      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/timberseg_val.jsonl",
+      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/zerowaste_f_val.jsonl"
     },
     "max_examples": null,
     "threshold": 0.5,

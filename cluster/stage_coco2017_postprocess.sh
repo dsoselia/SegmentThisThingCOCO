@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE=/home/dsoselia/scratch.varshney-prj/SegmentThisThing
+BASE=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect
 REPO="$BASE/segment_this_thing"
 RAW="$BASE/data/coco2017/raw"
 MANIFESTS="$BASE/data/coco2017/manifests"
@@ -67,7 +67,7 @@ python - <<'PY' > "$LOGDIR/coco2017_counts.json"
 import json
 from pathlib import Path
 
-base = Path("/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017")
+base = Path("/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017")
 manifest_dir = base / "manifests"
 raw_dir = base / "raw"
 

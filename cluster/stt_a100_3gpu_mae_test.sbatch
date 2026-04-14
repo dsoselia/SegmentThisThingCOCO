@@ -11,14 +11,14 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=92000
 #SBATCH --time=02:00:00
-#SBATCH --output=/home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/%x-%j.out
+#SBATCH --output=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm/%x-%j.out
 
 set -euo pipefail
 
-ROOT=/home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+ROOT=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 cd "$ROOT"
 
-mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm
+mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm
 
 CONDA_SH="/home/dsoselia/scratch.varshney-prj/miniconda3/etc/profile.d/conda.sh"
 if [[ -f "$CONDA_SH" ]]; then
@@ -35,7 +35,7 @@ conda activate py12
 
 CONFIG="${CONFIG:-configs/stt_b_subset_paper_mae_test_3xa100.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-3}"
-GPU_WATCH="/home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}-gpu_watch.csv"
+GPU_WATCH="/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}-gpu_watch.csv"
 
 echo "job_id=$SLURM_JOB_ID"
 echo "hostname=$(hostname)"

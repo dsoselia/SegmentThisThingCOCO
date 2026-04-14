@@ -2,10 +2,10 @@
 
 ## Paths
 
-- Cluster root: `/home/dsoselia/scratch.varshney-prj/SegmentThisThing`
-- Repo checkout: `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing`
-- Docs dir: `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/docs`
-- Weights path: `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/stt-b-qbkbmb5qsb4q2.pth`
+- Cluster root: `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect`
+- Repo checkout: `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing`
+- Docs dir: `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/docs`
+- Weights path: `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/stt-b-qbkbmb5qsb4q2.pth`
 
 ## Environment
 
@@ -18,10 +18,10 @@ ssh Zaratan
 source /home/dsoselia/scratch.varshney-prj/miniconda3/etc/profile.d/conda.sh
 conda create -y -n stt-fullrun --clone py12
 conda activate stt-fullrun
-cd /home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+cd /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 pip install -e .
 pip install pycocotools scipy
-mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThing/docs
+mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/docs
 ```
 
 If a package needs GitHub or external internet, install it on the login node, not on `zaratan-compute`.
@@ -34,21 +34,23 @@ Build external eval manifests only after the raw datasets are staged:
 python scripts/make_timberseg_manifest.py \
   --root /path/to/TimberSeg \
   --split val \
-  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl
+  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/timberseg_val.jsonl
 
 python scripts/make_zerowaste_f_manifest.py \
   --root /path/to/ZeroWaste-f \
   --split val \
-  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl
+  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/zerowaste_f_val.jsonl
 ```
 
 ## COCO 2017 Staging
+
+If the COCO dataset is already staged elsewhere on Zaratan, reuse it with a symlink instead of downloading it again. Only restage if the shared copy is missing or incompatible.
 
 Use `Zaratan` only for the raw downloads and extraction into the project root:
 
 ```bash
 ssh Zaratan
-BASE=/home/dsoselia/scratch.varshney-prj/SegmentThisThing
+BASE=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect
 mkdir -p "$BASE/data/coco2017/raw" "$BASE/downloads/coco2017"
 cd "$BASE/downloads/coco2017"
 wget -c http://images.cocodataset.org/zips/train2017.zip
@@ -65,40 +67,40 @@ Build manifests and validate them on `zaratan-compute`:
 ssh zaratan-compute
 source /home/dsoselia/scratch.varshney-prj/miniconda3/etc/profile.d/conda.sh
 conda activate stt-coco
-cd /home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+cd /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 
 python scripts/make_image_manifest.py \
-  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/raw/train2017 \
-  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_mae_train_images.jsonl \
+  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/raw/train2017 \
+  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_mae_train_images.jsonl \
   --dataset-name coco2017 \
   --split-name train
 
 python scripts/make_image_manifest.py \
-  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/raw/val2017 \
-  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_mae_val_images.jsonl \
+  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/raw/val2017 \
+  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_mae_val_images.jsonl \
   --dataset-name coco2017 \
   --split-name val
 
 python scripts/make_instance_manifest.py \
-  --annotations /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/raw/annotations/instances_train2017.json \
-  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/raw/train2017 \
-  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_train_instances.jsonl \
+  --annotations /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/raw/annotations/instances_train2017.json \
+  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/raw/train2017 \
+  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_train_instances.jsonl \
   --dataset-name coco2017 \
   --split-name train
 
 python scripts/make_instance_manifest.py \
-  --annotations /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/raw/annotations/instances_val2017.json \
-  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/raw/val2017 \
-  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_val_instances.jsonl \
+  --annotations /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/raw/annotations/instances_val2017.json \
+  --images-dir /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/raw/val2017 \
+  --output /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_val_instances.jsonl \
   --dataset-name coco2017 \
   --split-name val
 
 python scripts/validate_stt_manifest.py \
-  --manifest /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_mae_train_images.jsonl \
+  --manifest /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_mae_train_images.jsonl \
   --kind mae
 
 python scripts/validate_stt_manifest.py \
-  --manifest /home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_train_instances.jsonl \
+  --manifest /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_train_instances.jsonl \
   --kind seg
 ```
 
@@ -110,7 +112,7 @@ Use this first on `zaratan-compute`:
 ssh zaratan-compute
 source /home/dsoselia/scratch.varshney-prj/miniconda3/etc/profile.d/conda.sh
 conda activate stt-fullrun
-cd /home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+cd /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 python scripts/run_stt.py train-stt --config configs/stt_b_cluster_debug.json
 ```
 
@@ -138,7 +140,7 @@ Point `runtime.resume_from` at the checkpoint listed in `last_checkpoint.txt`, t
 Example:
 
 ```bash
-cat /home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_cluster_ddp_smoke/<run_dir>/last_checkpoint.txt
+cat /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_cluster_ddp_smoke/<run_dir>/last_checkpoint.txt
 ```
 
 Update the config and rerun:
@@ -165,7 +167,7 @@ Tune at minimum:
 
 ## Notes To Keep In `docs/`
 
-For each debug or smoke run, write a short markdown note in `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/docs` covering:
+For each debug or smoke run, write a short markdown note in `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/docs` covering:
 
 - exact config used
 - GPU count and host

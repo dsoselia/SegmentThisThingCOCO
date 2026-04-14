@@ -9,13 +9,13 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=92000
 #SBATCH --time=08:00:00
-#SBATCH --output=/home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/%x-%j.out
+#SBATCH --output=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm/%x-%j.out
 
 set -euo pipefail
 
-ROOT=/home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+ROOT=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 cd "$ROOT"
-mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm /home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts
+mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/artifacts
 
 CONDA_SH="/home/dsoselia/scratch.varshney-prj/miniconda3/etc/profile.d/conda.sh"
 if [[ -f "$CONDA_SH" ]]; then
@@ -31,8 +31,8 @@ conda activate py12
 
 CONFIG="${CONFIG:-configs/stt_b_coco_paper_mae_3xa100.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-3}"
-GPU_WATCH="/home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}-gpu_watch.csv"
-ARTIFACT="/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt"
+GPU_WATCH="/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}-gpu_watch.csv"
+ARTIFACT="/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt"
 
 echo "job_id=$SLURM_JOB_ID"
 echo "hostname=$(hostname)"
@@ -50,5 +50,5 @@ trap 'kill $GPU_WATCH_PID 2>/dev/null || true' EXIT
 
 torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" scripts/run_stt.py pretrain-mae --config "$CONFIG"
 
-LATEST_RUN="$(find /home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_coco_paper_mae_3xa100 -maxdepth 1 -type d -name 'mae_*' | sort | tail -n 1)"
+LATEST_RUN="$(find /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_coco_paper_mae_3xa100 -maxdepth 1 -type d -name 'mae_*' | sort | tail -n 1)"
 cp "$LATEST_RUN/final_encoder.pt" "$ARTIFACT"

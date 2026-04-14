@@ -4,7 +4,7 @@
     "tokenizer_type": "stt_ring"
   },
   "runtime": {
-    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_h100_single_tune_mb128",
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_h100_single_tune_mb128",
     "profile_name": "h100_single_tune_mb128",
     "seed": 1337,
     "device": "cuda",
@@ -42,8 +42,8 @@
   },
   "segmentation": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_train.jsonl",
-    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/stt-b-qbkbmb5qsb4q2.pth",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_train.jsonl",
+    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/stt-b-qbkbmb5qsb4q2.pth",
     "lr": 1.0e-05,
     "weight_decay": 0.001,
     "warmup_steps": 200,
@@ -56,7 +56,7 @@
   },
   "evaluation": {
     "named_eval_manifests": {
-      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl"
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_val.jsonl"
     },
     "max_examples": 64,
     "threshold": 0.5,

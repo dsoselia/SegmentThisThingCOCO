@@ -34,15 +34,15 @@ It focuses on:
 - `runs/`
   - local run outputs when working in this checkout
 - cluster outputs are written under:
-  - `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/...`
+  - `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/...`
 - cluster logs are written under:
-  - `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/...`
+  - `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm/...`
 
 ### Existing documentation
 
-- [README.md](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/README.md)
-- [REPLICATION_PIPELINE.md](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/REPLICATION_PIPELINE.md)
-- [CLUSTER_RUNBOOK.md](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/CLUSTER_RUNBOOK.md)
+- [README.md](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/README.md)
+- [REPLICATION_PIPELINE.md](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/REPLICATION_PIPELINE.md)
+- [CLUSTER_RUNBOOK.md](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/CLUSTER_RUNBOOK.md)
 
 This file is the concise operator-facing version of those notes.
 
@@ -78,7 +78,7 @@ python scripts/run_stt.py pretrain-mae --config <config>
 
 Current production `3x A100` config:
 
-- [stt_b_coco_paper_mae_3xa100.json](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/configs/stt_b_coco_paper_mae_3xa100.json)
+- [stt_b_coco_paper_mae_3xa100.json](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/configs/stt_b_coco_paper_mae_3xa100.json)
 
 Important settings:
 
@@ -100,7 +100,7 @@ Successful MAE writes:
 - run-local encoder artifact:
   - `<run_dir>/final_encoder.pt`
 - cluster-exported handoff artifact:
-  - `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt`
+  - `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt`
 
 That exported artifact is what the segmentation config should point at.
 
@@ -129,14 +129,14 @@ python scripts/run_stt.py train-stt --config <config>
 
 Current production `3x A100` config:
 
-- [stt_b_coco_paper_seg_3xa100.json](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/configs/stt_b_coco_paper_seg_3xa100.json)
+- [stt_b_coco_paper_seg_3xa100.json](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/configs/stt_b_coco_paper_seg_3xa100.json)
 
 Important settings:
 
 - dataset: COCO 2017 train instances
 - eval dataset: COCO 2017 val instances
 - initialization:
-  - `pretrained_encoder = /home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt`
+  - `pretrained_encoder = /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt`
   - `init_checkpoint = null`
 - `micro_batch_size = 2`
 - `num_workers = 4` per rank
@@ -161,11 +161,11 @@ When that is set, the training code:
 
 Current resume config:
 
-- [stt_b_coco_paper_seg_3xa100_resume_from_6000.json](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/configs/stt_b_coco_paper_seg_3xa100_resume_from_6000.json)
+- [stt_b_coco_paper_seg_3xa100_resume_from_6000.json](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/configs/stt_b_coco_paper_seg_3xa100_resume_from_6000.json)
 
 Current resume wrapper:
 
-- [stt_a100_3gpu_coco_seg_resume.sbatch](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/cluster/stt_a100_3gpu_coco_seg_resume.sbatch)
+- [stt_a100_3gpu_coco_seg_resume.sbatch](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/cluster/stt_a100_3gpu_coco_seg_resume.sbatch)
 
 ## Manifest Types
 
@@ -215,7 +215,7 @@ This is the correct default entrypoint for cluster work.
 
 ```bash
 ssh Zaratan
-cd /home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+cd /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 sbatch ./cluster/stt_a100_3gpu_coco_mae.sbatch
 ```
 
@@ -249,7 +249,7 @@ All current production jobs should be submitted from `ssh Zaratan`.
 
 ```bash
 ssh Zaratan
-cd /home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+cd /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 sbatch ./cluster/stt_a100_3gpu_coco_mae.sbatch
 ```
 
@@ -257,11 +257,11 @@ sbatch ./cluster/stt_a100_3gpu_coco_mae.sbatch
 
 This should be submitted only after the MAE artifact exists:
 
-- `/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt`
+- `/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt`
 
 ```bash
 ssh Zaratan
-cd /home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+cd /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 sbatch ./cluster/stt_a100_3gpu_coco_seg.sbatch
 ```
 
@@ -269,7 +269,7 @@ sbatch ./cluster/stt_a100_3gpu_coco_seg.sbatch
 
 ```bash
 ssh Zaratan
-cd /home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
+cd /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
 sbatch ./cluster/stt_a100_3gpu_coco_seg_resume.sbatch
 ```
 
@@ -292,25 +292,25 @@ sacct -j <jobid> --format=JobID,JobName%30,Partition,State,Elapsed,ExitCode,Node
 ### Read Slurm log
 
 ```bash
-tail -n 80 /home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/<jobname>-<jobid>.out
+tail -n 80 /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm/<jobname>-<jobid>.out
 ```
 
 ### Read run status
 
 ```bash
-sed -n '1,220p' /home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/<profile>/<run_dir>/RUN_STATUS.md
+sed -n '1,220p' /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/<profile>/<run_dir>/RUN_STATUS.md
 ```
 
 ### Check recent checkpoints
 
 ```bash
-ls -1 /home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/<profile>/<run_dir>/checkpoints | tail
+ls -1 /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/<profile>/<run_dir>/checkpoints | tail
 ```
 
 ### Check recent eval summaries
 
 ```bash
-ls -1 /home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/<profile>/<run_dir>/eval | tail
+ls -1 /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/<profile>/<run_dir>/eval | tail
 ```
 
 ## W&B Offline Runs
@@ -343,9 +343,9 @@ For resumed training, because the run directory is reused, multiple `offline-run
 
 Use this sequence:
 
-1. submit [stt_a100_3gpu_coco_mae.sbatch](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/cluster/stt_a100_3gpu_coco_mae.sbatch)
+1. submit [stt_a100_3gpu_coco_mae.sbatch](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/cluster/stt_a100_3gpu_coco_mae.sbatch)
 2. wait for exported encoder artifact
-3. submit [stt_a100_3gpu_coco_seg.sbatch](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/cluster/stt_a100_3gpu_coco_seg.sbatch)
-4. if interrupted by wall-clock limit, continue with [stt_a100_3gpu_coco_seg_resume.sbatch](/Users/davitsoselia/Downloads/SegmentThisThing/local_repo/cluster/stt_a100_3gpu_coco_seg_resume.sbatch)
+3. submit [stt_a100_3gpu_coco_seg.sbatch](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/cluster/stt_a100_3gpu_coco_seg.sbatch)
+4. if interrupted by wall-clock limit, continue with [stt_a100_3gpu_coco_seg_resume.sbatch](/Users/davitsoselia/Downloads/SegmentThisLogRectilinear/cluster/stt_a100_3gpu_coco_seg_resume.sbatch)
 
 That is the current operational path for training STT-B from scratch on COCO on Zaratan.

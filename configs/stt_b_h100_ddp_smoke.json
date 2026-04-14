@@ -4,7 +4,7 @@
     "tokenizer_type": "stt_ring"
   },
   "runtime": {
-    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_h100_ddp_smoke",
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_h100_ddp_smoke",
     "profile_name": "h100_ddp_smoke",
     "seed": 1337,
     "device": "cuda",
@@ -42,8 +42,8 @@
   },
   "segmentation": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_train.jsonl",
-    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/stt-b-qbkbmb5qsb4q2.pth",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_train.jsonl",
+    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/stt-b-qbkbmb5qsb4q2.pth",
     "lr": 1.0e-05,
     "weight_decay": 0.001,
     "warmup_steps": 200,
@@ -56,9 +56,9 @@
   },
   "evaluation": {
     "named_eval_manifests": {
-      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl",
-      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl",
-      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl"
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_val.jsonl",
+      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/timberseg_val.jsonl",
+      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/zerowaste_f_val.jsonl"
     },
     "max_examples": 128,
     "threshold": 0.5,

@@ -3,7 +3,7 @@
     "size": "b"
   },
   "runtime": {
-    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/sa1b_proxy",
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/sa1b_proxy",
     "seed": 1337,
     "device": "cuda",
     "amp_dtype": "bfloat16",
@@ -26,7 +26,7 @@
   },
   "mae": {
     "enabled": false,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_train.jsonl",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_train.jsonl",
     "views_per_image": 1,
     "target_batch_schedule": {
       "0": 32
@@ -34,8 +34,8 @@
   },
   "segmentation": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_train.jsonl",
-    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/stt-b-qbkbmb5qsb4q2.pth",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_train.jsonl",
+    "init_checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/stt-b-qbkbmb5qsb4q2.pth",
     "lr": 1.0e-05,
     "weight_decay": 0.001,
     "warmup_steps": 200,
@@ -53,11 +53,11 @@
     "prompt_noise_std": 0.0
   },
   "evaluation": {
-    "eval_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl",
+    "eval_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_val.jsonl",
     "named_eval_manifests": {
-      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/sa1b_proxy_val.jsonl",
-      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl",
-      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl"
+      "sa1b_proxy": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_val.jsonl",
+      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/timberseg_val.jsonl",
+      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/zerowaste_f_val.jsonl"
     },
     "max_examples": 300,
     "threshold": 0.5,
@@ -65,7 +65,7 @@
   },
   "benchmark": {
     "enabled": true,
-    "checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/stt-b-qbkbmb5qsb4q2.pth",
+    "checkpoint": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/stt-b-qbkbmb5qsb4q2.pth",
     "warmup_steps": 10,
     "measure_steps": 50,
     "image_size": 1536
