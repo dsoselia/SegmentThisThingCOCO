@@ -23,6 +23,8 @@ def _normalize_tokens(tokens: torch.Tensor, device: torch.device) -> torch.Tenso
 def _evaluate_manifest(config: ExperimentConfig, model: torch.nn.Module, foveator, manifest_path: str, device: torch.device) -> dict[str, Any]:
     dataset = EvalManifestDataset(manifest_path, config.evaluation.max_examples)
     per_dataset = defaultdict(list)
+    valid_mask_counts = defaultdict(int)
+    example_count = defaultdict(int)
 
     for sample in dataset:
         image = sample.image
@@ -48,23 +50,42 @@ def _evaluate_manifest(config: ExperimentConfig, model: torch.nn.Module, foveato
         tokens, valid_mask, crop_bounds = build_model_inputs(image, center, foveator)
         norm = _normalize_tokens(tokens.unsqueeze(0).float(), device)
         pred_masks, pred_iou = model(norm, valid_mask.unsqueeze(0))
-        best_idx = pred_iou.squeeze(0).argmax()
-        recon = reconstruct_logits_to_image(
-            foveator,
-            pred_masks.squeeze(0)[best_idx].cpu(),
-            crop_bounds.cpu(),
-            tuple(image.shape[:2]),
-        )
-        pred = recon.sigmoid() > config.evaluation.threshold
-        inter = (pred & mask.cpu().bool()).sum().item()
-        union = (pred | mask.cpu().bool()).sum().item()
-        iou = 0.0 if union == 0 else inter / union
+        center_x = int(center[0].item())
+        center_y = int(center[1].item())
+        mask_cpu = mask.cpu().bool()
+
+        best_valid_iou = 0.0
+        valid_found = False
+        for candidate_logits in pred_masks.squeeze(0).cpu():
+            recon = reconstruct_logits_to_image(
+                foveator,
+                candidate_logits,
+                crop_bounds.cpu(),
+                tuple(image.shape[:2]),
+            ).squeeze(0)
+            pred = recon.sigmoid() > config.evaluation.threshold
+            if not bool(pred[center_y, center_x].item()):
+                continue
+            valid_found = True
+            inter = (pred & mask_cpu).sum().item()
+            union = (pred | mask_cpu).sum().item()
+            iou = 0.0 if union == 0 else inter / union
+            if iou > best_valid_iou:
+                best_valid_iou = iou
+
+        iou = best_valid_iou if valid_found else 0.0
         per_dataset[sample.dataset_name].append(iou)
+        valid_mask_counts[sample.dataset_name] += int(valid_found)
+        example_count[sample.dataset_name] += 1
 
     summary: dict[str, Any] = {
         "manifest_path": manifest_path,
         "per_dataset_miou": {k: sum(v) / max(len(v), 1) for k, v in sorted(per_dataset.items())},
         "num_examples": sum(len(v) for v in per_dataset.values()),
+        "per_dataset_valid_mask_rate": {
+            k: valid_mask_counts[k] / max(example_count[k], 1)
+            for k in sorted(example_count)
+        },
     }
     if summary["per_dataset_miou"]:
         summary["global_miou"] = sum(summary["per_dataset_miou"].values()) / len(summary["per_dataset_miou"])
