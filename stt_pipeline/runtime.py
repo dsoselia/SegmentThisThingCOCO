@@ -7,7 +7,7 @@ import resource
 import socket
 import threading
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -86,7 +86,11 @@ def init_distributed(runtime_config) -> DistributedContext:
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend=runtime_config.backend)
+    timeout_minutes = max(1, int(getattr(runtime_config, "distributed_timeout_minutes", 120)))
+    dist.init_process_group(
+        backend=runtime_config.backend,
+        timeout=timedelta(minutes=timeout_minutes),
+    )
     return DistributedContext(enabled=True, rank=rank, local_rank=local_rank, world_size=world_size)
 
 

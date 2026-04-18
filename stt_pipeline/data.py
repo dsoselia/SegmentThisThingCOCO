@@ -72,6 +72,13 @@ def read_jsonl(path: str | Path) -> list[dict]:
     return entries
 
 
+def resolve_manifest_path(manifest_path: str | Path, entry_path: str | Path) -> str:
+    entry = Path(entry_path)
+    if entry.is_absolute():
+        return str(entry)
+    return str((Path(manifest_path).resolve().parent / entry).resolve())
+
+
 class IndexedJsonl:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -165,7 +172,8 @@ class MAETrainingManifestDataset(torch.utils.data.Dataset):
         worker_seed = 0 if worker is None else worker.seed
         rng = random.Random(worker_seed + self.seed + index * 9973)
         entry = self.manifest[index]
-        image = load_image(entry["image_path"])
+        image_path = resolve_manifest_path(self.manifest_path, entry["image_path"])
+        image = load_image(image_path)
         image_size = (image.shape[1], image.shape[0])
         center = _sample_uniform_center(image_size, self.margin, rng)
         return Sample(
@@ -173,7 +181,7 @@ class MAETrainingManifestDataset(torch.utils.data.Dataset):
             mask=torch.zeros((1, 1), dtype=torch.bool),
             center=center,
             dataset_name=entry.get("dataset_name", "sa1b"),
-            image_path=entry["image_path"],
+            image_path=image_path,
         )
 
 
@@ -224,8 +232,9 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
         worker_seed = 0 if worker is None else worker.seed
 
         entry = self.manifest[index]
+        image_path = resolve_manifest_path(self.manifest_path, entry["image_path"])
         image_load_start = time.perf_counter()
-        image = load_image(entry["image_path"])
+        image = load_image(image_path)
         image_decode_time = time.perf_counter() - image_load_start
 
         image_size = (image.shape[1], image.shape[0])
@@ -237,6 +246,9 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
 
         samples: list[Sample] = []
         for segment_idx, segment in enumerate(selected_segments):
+            segment = dict(segment)
+            if "mask_path" in segment:
+                segment["mask_path"] = resolve_manifest_path(self.manifest_path, segment["mask_path"])
             timings: dict[str, float] = {}
             timings["image_decode_time"] = image_decode_time if segment_idx == 0 else 0.0
 
@@ -267,7 +279,7 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
                     mask=target,
                     center=center,
                     dataset_name=entry.get("dataset_name", "sa1b"),
-                    image_path=entry["image_path"],
+                    image_path=image_path,
                     preprocessing={
                         **timings,
                         "valid_token_count": float(valid_mask.sum().item()),
@@ -306,12 +318,16 @@ def _furthest_point_with_fallback(mask: torch.Tensor) -> torch.Tensor:
 class EvalManifestDataset(torch.utils.data.Dataset):
     def __init__(self, manifest_path: str | Path, max_examples: Optional[int] = None):
         raw = read_jsonl(manifest_path)
+        manifest_path = str(manifest_path)
         self.entries = []
         for entry in raw:
             for segment in entry["segments"]:
+                segment = dict(segment)
+                if "mask_path" in segment:
+                    segment["mask_path"] = resolve_manifest_path(manifest_path, segment["mask_path"])
                 self.entries.append(
                     {
-                        "image_path": entry["image_path"],
+                        "image_path": resolve_manifest_path(manifest_path, entry["image_path"]),
                         "dataset_name": entry.get("dataset_name", "unknown"),
                         "segment": segment,
                     }

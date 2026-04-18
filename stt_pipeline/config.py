@@ -36,6 +36,7 @@ class RuntimeConfig:
     num_interop_threads: int = 0
     distributed: bool = True
     backend: str = "nccl"
+    distributed_timeout_minutes: int = 120
     micro_batch_size: int = 2
     num_workers: int = 4
     pin_memory: bool = True
@@ -53,7 +54,7 @@ class RuntimeConfig:
     save_rng_state: bool = True
     run_status_filename: str = "RUN_STATUS.md"
     wandb_enabled: bool = False
-    wandb_project: str = "segment-this-thing"
+    wandb_project: str = "SegmentThisLogRectilinearZaratan"
     wandb_entity: Optional[str] = None
     wandb_mode: str = "offline"
     wandb_dir: Optional[str] = None

@@ -412,8 +412,6 @@ def _run_periodic_eval(
     step: int,
     ctx: DistributedContext,
 ) -> dict[str, Any] | None:
-    if not ctx.is_main_process:
-        return None
     summary = evaluate_checkpoint(
         config,
         checkpoint_path=str(checkpoint_path),
@@ -421,7 +419,9 @@ def _run_periodic_eval(
         summary_name=f"summary_step_{step:07d}.json",
         enable_wandb=False,
     )
-    return summary
+    if ctx.is_main_process:
+        return summary
+    return None
 
 
 @torch.no_grad()
@@ -905,7 +905,9 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
             should_eval = config.runtime.eval_every is not None and step > 0 and step % config.runtime.eval_every == 0
             if should_eval:
                 eval_checkpoint = checkpoint_path
-                if eval_checkpoint is None and ctx.is_main_process:
+                if eval_checkpoint is None:
+                    eval_checkpoint = run_dir / "checkpoints" / f"checkpoint_step_{step:07d}.pt"
+                if ctx.is_main_process and not eval_checkpoint.exists():
                     eval_checkpoint = _save_training_checkpoint(
                         run_dir,
                         config,
@@ -917,14 +919,8 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                         extra={"phase": "segmentation", "trigger": "eval"},
                     )
                 distributed_barrier(ctx)
-                if eval_checkpoint is not None:
-                    summary = _run_periodic_eval(
-                        config=config,
-                        checkpoint_path=eval_checkpoint,
-                        run_dir=run_dir,
-                        step=step,
-                        ctx=ctx,
-                    )
+                if eval_checkpoint.exists():
+                    summary = _run_periodic_eval(config=config, checkpoint_path=eval_checkpoint, run_dir=run_dir, step=step, ctx=ctx)
                     _update_status(
                         run_dir,
                         config,

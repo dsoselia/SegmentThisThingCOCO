@@ -7,19 +7,39 @@ from typing import Any
 import torch
 
 import segment_this_thing
-from segment_this_thing import Foveator
+from segment_this_thing import Foveator, LogRectilinearFoveator
 
 from .config import ModelConfig
 from .runtime import get_rng_state, unwrap_model
 
 
-def build_foveator(model_config: ModelConfig) -> Foveator:
-    if model_config.tokenizer_type != "stt_ring":
-        raise ValueError(f"Unsupported tokenizer_type for baseline pipeline: {model_config.tokenizer_type}")
-    return Foveator(token_size=model_config.token_size, strides=model_config.strides, grid_sizes=model_config.grid_sizes)
+def _default_pattern_size(model_config: ModelConfig) -> int:
+    if model_config.pattern_size is not None:
+        return model_config.pattern_size
+    return model_config.token_size * model_config.strides[-1] * model_config.grid_sizes[-1]
 
 
-def build_model(size: str, foveator: Foveator):
+def build_foveator(model_config: ModelConfig) -> Foveator | LogRectilinearFoveator:
+    if model_config.tokenizer_type == "stt_ring":
+        return Foveator(
+            token_size=model_config.token_size,
+            strides=model_config.strides,
+            grid_sizes=model_config.grid_sizes,
+        )
+    if model_config.tokenizer_type == "log_rect_box":
+        if model_config.log_rect_axis_bins is None:
+            raise ValueError("log_rect_box requires model.log_rect_axis_bins to be set")
+        return LogRectilinearFoveator(
+            token_size=model_config.token_size,
+            pattern_size=_default_pattern_size(model_config),
+            axis_bins=model_config.log_rect_axis_bins,
+            exponent=model_config.log_rect_exponent,
+            center_width=model_config.log_rect_center_width,
+        )
+    raise ValueError(f"Unsupported tokenizer_type: {model_config.tokenizer_type}")
+
+
+def build_model(size: str, foveator: Foveator | LogRectilinearFoveator):
     builder = getattr(segment_this_thing, f"build_segment_this_thing_{size}")
     return builder(num_tokens=foveator.get_num_tokens(), token_size=foveator.token_size)
 

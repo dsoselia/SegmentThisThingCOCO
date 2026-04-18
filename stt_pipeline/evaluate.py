@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from .config import ExperimentConfig
 from .data import EvalManifestDataset, resolve_eval_manifests
@@ -19,12 +20,22 @@ def _normalize_tokens(tokens: torch.Tensor, device: torch.device) -> torch.Tenso
     return (tokens / 255.0 - mean) / std
 
 
-@torch.no_grad()
-def _evaluate_manifest(config: ExperimentConfig, model: torch.nn.Module, foveator, manifest_path: str, device: torch.device) -> dict[str, Any]:
-    dataset = EvalManifestDataset(manifest_path, config.evaluation.max_examples)
-    per_dataset = defaultdict(list)
+def _dist_context() -> tuple[bool, int, int]:
+    if dist.is_available() and dist.is_initialized():
+        return True, dist.get_rank(), dist.get_world_size()
+    return False, 0, 1
 
-    for sample in dataset:
+
+@torch.no_grad()
+def _evaluate_manifest(config: ExperimentConfig, model: torch.nn.Module, foveator, manifest_path: str, device: torch.device) -> dict[str, Any] | None:
+    dataset = EvalManifestDataset(manifest_path, config.evaluation.max_examples)
+    dist_enabled, rank, world_size = _dist_context()
+    dataset_names = sorted({entry["dataset_name"] for entry in dataset.entries})
+    local_sums = {name: 0.0 for name in dataset_names}
+    local_counts = {name: 0 for name in dataset_names}
+
+    for index in range(rank, len(dataset), world_size):
+        sample = dataset[index]
         image = sample.image
         if config.evaluation.upsample_small_images:
             image = maybe_resize_small_image(image, foveator.get_pattern_bounds_size())
@@ -59,12 +70,29 @@ def _evaluate_manifest(config: ExperimentConfig, model: torch.nn.Module, foveato
         inter = (pred & mask.cpu().bool()).sum().item()
         union = (pred | mask.cpu().bool()).sum().item()
         iou = 0.0 if union == 0 else inter / union
-        per_dataset[sample.dataset_name].append(iou)
+        local_sums[sample.dataset_name] += iou
+        local_counts[sample.dataset_name] += 1
+
+    if dist_enabled:
+        sum_tensor = torch.tensor([local_sums[name] for name in dataset_names], dtype=torch.float64, device=device)
+        count_tensor = torch.tensor([local_counts[name] for name in dataset_names], dtype=torch.float64, device=device)
+        dist.all_reduce(sum_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+        global_sums = {name: float(sum_tensor[idx].item()) for idx, name in enumerate(dataset_names)}
+        global_counts = {name: int(round(count_tensor[idx].item())) for idx, name in enumerate(dataset_names)}
+    else:
+        global_sums = local_sums
+        global_counts = local_counts
+
+    if dist_enabled and rank != 0:
+        return None
 
     summary: dict[str, Any] = {
         "manifest_path": manifest_path,
-        "per_dataset_miou": {k: sum(v) / max(len(v), 1) for k, v in sorted(per_dataset.items())},
-        "num_examples": sum(len(v) for v in per_dataset.values()),
+        "per_dataset_miou": {
+            name: (global_sums[name] / global_counts[name]) for name in dataset_names if global_counts[name] > 0
+        },
+        "num_examples": sum(global_counts.values()),
     }
     if summary["per_dataset_miou"]:
         summary["global_miou"] = sum(summary["per_dataset_miou"].values()) / len(summary["per_dataset_miou"])
@@ -84,9 +112,11 @@ def evaluate_checkpoint(
 ) -> dict[str, Any]:
     out_dir = build_run_dir(config.runtime.output_dir, "eval") if run_dir is None else Path(run_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    save_run_metadata(out_dir, config, {"checkpoint_path": checkpoint_path})
+    dist_enabled, rank, _ = _dist_context()
+    if not dist_enabled or rank == 0:
+        save_run_metadata(out_dir, config, {"checkpoint_path": checkpoint_path})
     wandb_run = None
-    if enable_wandb:
+    if enable_wandb and (not dist_enabled or rank == 0):
         wandb_run, _ = init_wandb_run(out_dir, config, extra={"phase": "evaluation", "checkpoint_path": checkpoint_path})
 
     try:
@@ -101,9 +131,15 @@ def evaluate_checkpoint(
         skipped_manifests = {}
         for manifest_name, manifest_path in resolve_eval_manifests(config.evaluation):
             if not Path(manifest_path).exists():
-                skipped_manifests[manifest_name] = manifest_path
+                if not dist_enabled or rank == 0:
+                    skipped_manifests[manifest_name] = manifest_path
                 continue
-            manifest_summaries[manifest_name] = _evaluate_manifest(config, model, foveator, manifest_path, device)
+            summary = _evaluate_manifest(config, model, foveator, manifest_path, device)
+            if summary is not None:
+                manifest_summaries[manifest_name] = summary
+
+        if dist_enabled and rank != 0:
+            return {}
 
         summary: dict[str, Any] = {
             "checkpoint_path": checkpoint_path,

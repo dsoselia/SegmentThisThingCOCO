@@ -1,11 +1,14 @@
 {
   "model": {
     "size": "b",
-    "tokenizer_type": "stt_ring"
+    "tokenizer_type": "log_rect_box",
+    "log_rect_axis_bins": 13,
+    "log_rect_exponent": 4.0,
+    "log_rect_center_width": 16
   },
   "runtime": {
-    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_subset_paper_mae_test_3xa100",
-    "profile_name": "subset_paper_mae_test_3xa100",
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_coco_log_rect_mae_3xa100",
+    "profile_name": "coco_log_rect_mae_3xa100",
     "seed": 1337,
     "device": "cuda",
     "amp_dtype": "bfloat16",
@@ -37,15 +40,15 @@
     "wandb_enabled": true,
     "wandb_project": "SegmentThisLogRectilinearZaratan",
     "wandb_mode": "offline",
-    "wandb_tags": ["stt", "mae", "subset", "paper", "test", "3xa100", "offline"],
-    "num_steps": 3000
+    "wandb_tags": ["stt", "mae", "coco", "log-rect", "3xa100", "offline"],
+    "num_steps": 10000
   },
   "mae": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/sa1b_proxy_train.jsonl",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_mae_train_images.jsonl",
     "lr": 0.0001220703125,
     "weight_decay": 0.001,
-    "warmup_steps": 10000,
+    "warmup_steps": 1000,
     "mask_ratio": 0.75,
     "margin": 256,
     "views_per_image": 2,
@@ -55,7 +58,8 @@
     }
   },
   "assumptions": [
-    "Quick paper-shaped MAE test on the staged SA-1B subset using 3x A100.",
-    "Starts from random STT weights and is intended only to validate the first stage of the full pipeline."
+    "Tokenizer-only COCO MAE comparison against the ring baseline.",
+    "Uses the canonical 13x13 log-rect box grid with inferred 1280 pixel crop size.",
+    "Starts from random STT-B weights and writes the canonical encoder artifact for log-rect COCO segmentation."
   ]
 }

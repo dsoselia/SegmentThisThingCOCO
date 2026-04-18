@@ -35,7 +35,7 @@
     "save_rng_state": true,
     "run_status_filename": "RUN_STATUS.md",
     "wandb_enabled": true,
-    "wandb_project": "segment-this-thing",
+    "wandb_project": "SegmentThisLogRectilinearZaratan",
     "wandb_mode": "offline",
     "wandb_tags": ["stt", "segmentation", "coco", "paper", "quick", "2xa100", "offline"],
     "num_steps": 100

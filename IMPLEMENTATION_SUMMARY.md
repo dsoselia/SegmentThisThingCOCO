@@ -50,7 +50,7 @@ The core model package now also contains a second tokenizer path:
   - explicit per-token rectangular boxes instead of nested stride rings
   - log-rectilinear spacing with summed-area-table averaging
   - matched-budget default of `13 x 13 = 169` tokens for `STT-B`
-  - integrated into training, eval, and benchmarking via `model.tokenizer_type`
+  - integrated into training, eval, and benchmarking via `model.tokenizer_type = "log_rect_box"`
 
 ## Assumptions and Deviations
 
