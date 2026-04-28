@@ -44,8 +44,8 @@
     "eval_manifest": "manifests/eval_smoke.jsonl",
     "named_eval_manifests": {
       "sa1b_proxy": "manifests/eval_smoke.jsonl",
-      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/timberseg_val.jsonl",
-      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/manifests/zerowaste_f_val.jsonl"
+      "timberseg": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/timberseg_val.jsonl",
+      "zerowaste_f": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/manifests/zerowaste_f_val.jsonl"
     },
     "max_examples": 2
   },

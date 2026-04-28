@@ -4,7 +4,7 @@
     "tokenizer_type": "stt_ring"
   },
   "runtime": {
-    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_coco_paper_mae_2xa100_smoke",
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_coco_paper_mae_2xa100_smoke",
     "profile_name": "coco_paper_mae_2xa100_smoke",
     "seed": 1337,
     "device": "cuda",
@@ -42,7 +42,7 @@
   },
   "mae": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_mae_train_images.jsonl",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_mae_train_images.jsonl",
     "lr": 0.0001220703125,
     "weight_decay": 0.001,
     "warmup_steps": 200,

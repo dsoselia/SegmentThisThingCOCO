@@ -11,14 +11,14 @@
 #SBATCH --cpus-per-task=22
 #SBATCH --mem=128000
 #SBATCH --time=02:00:00
-#SBATCH --output=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm/%x-%j.out
+#SBATCH --output=/home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/%x-%j.out
 
 set -euo pipefail
 
-ROOT=/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/segment_this_thing
+ROOT=/home/dsoselia/scratch.varshney-prj/SegmentThisThing/segment_this_thing
 cd "$ROOT"
 
-mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/slurm
+mkdir -p /home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm
 
 CONDA_SH="/home/dsoselia/scratch.varshney-prj/miniconda3/etc/profile.d/conda.sh"
 if [[ -f "$CONDA_SH" ]]; then

@@ -4,7 +4,7 @@
     "tokenizer_type": "stt_ring"
   },
   "runtime": {
-    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/runs/stt_b_coco_paper_seg_2xa100",
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_coco_paper_seg_2xa100",
     "profile_name": "coco_paper_seg_2xa100",
     "seed": 1337,
     "device": "cuda",
@@ -42,8 +42,8 @@
   },
   "segmentation": {
     "enabled": true,
-    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_train_instances.jsonl",
-    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/artifacts/stt_b_coco_paper_mae_2xa100_final_encoder.pt",
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_train_instances.jsonl",
+    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_2xa100_final_encoder.pt",
     "init_checkpoint": null,
     "lr": 1.52587890625e-05,
     "weight_decay": 0.001,
@@ -64,7 +64,7 @@
   },
   "evaluation": {
     "named_eval_manifests": {
-      "coco2017_val": "/home/dsoselia/scratch.varshney-prj/SegmentThisThingLogRect/data/coco2017/manifests/coco2017_val_instances.jsonl"
+      "coco2017_val": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_val_instances.jsonl"
     },
     "max_examples": 1000,
     "threshold": 0.5,
