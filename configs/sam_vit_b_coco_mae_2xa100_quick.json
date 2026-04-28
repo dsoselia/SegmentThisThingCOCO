@@ -1,0 +1,52 @@
+{
+  "model": {
+    "size": "vit_b"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/runs/sam_vit_b_coco_mae_2xa100_quick",
+    "profile_name": "sam_vit_b_coco_mae_2xa100_quick",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 2,
+    "num_interop_threads": 1,
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 1,
+    "num_workers": 2,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "prefetch_factor": 2,
+    "dataloader_timeout_s": 600,
+    "save_every": 2,
+    "log_every": 1,
+    "eval_every": null,
+    "resume_from": null,
+    "checkpoint_keep_last": 2,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "SAMZaratan",
+    "wandb_mode": "offline",
+    "wandb_tags": ["sam", "mae", "coco", "quick", "2xa100", "offline"],
+    "num_steps": 4
+  },
+  "mae": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_mae_train_images.jsonl",
+    "lr": 0.0001220703125,
+    "weight_decay": 0.001,
+    "warmup_steps": 1,
+    "mask_ratio": 0.75,
+    "effective_batch_size": 4,
+    "target_batch_schedule": {
+      "0": 4
+    }
+  }
+}

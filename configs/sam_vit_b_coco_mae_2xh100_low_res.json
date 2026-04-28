@@ -1,0 +1,59 @@
+{
+  "model": {
+    "size": "vit_b",
+    "image_size": 208
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/runs/sam_vit_b_coco_mae_2xh100_low_res",
+    "profile_name": "sam_vit_b_coco_mae_2xh100_low_res",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 2,
+    "num_interop_threads": 1,
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 256,
+    "num_workers": 6,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 600,
+    "save_every": 500,
+    "log_every": 20,
+    "eval_every": null,
+    "resume_from": null,
+    "checkpoint_keep_last": 4,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "SAMZaratan_low_res",
+    "wandb_mode": "offline",
+    "wandb_tags": ["sam", "mae", "coco", "low_res", "2xh100", "offline"],
+    "num_steps": 10000
+  },
+  "mae": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_mae_train_images.jsonl",
+    "lr": 0.0001220703125,
+    "weight_decay": 0.001,
+    "warmup_steps": 1000,
+    "mask_ratio": 0.75,
+    "effective_batch_size": 1024,
+    "target_batch_schedule": {
+      "0": 1024
+    }
+  },
+  "assumptions": [
+    "Low-resolution SAM MAE run at 208x208 on 2xH100.",
+    "Keeps effective batch size aligned with the earlier comparable runs."
+  ]
+}

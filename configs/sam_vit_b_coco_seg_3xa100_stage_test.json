@@ -1,0 +1,72 @@
+{
+  "model": {
+    "size": "vit_b"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/runs/sam_vit_b_coco_seg_3xa100_stage_test",
+    "profile_name": "sam_vit_b_coco_seg_3xa100_stage_test",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 2,
+    "num_interop_threads": 1,
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 1,
+    "num_workers": 4,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "prefetch_factor": 2,
+    "dataloader_timeout_s": 600,
+    "save_every": 30,
+    "log_every": 10,
+    "eval_every": 30,
+    "resume_from": null,
+    "checkpoint_keep_last": 4,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "SAMZaratan",
+    "wandb_mode": "offline",
+    "wandb_tags": ["sam", "segmentation", "coco", "stage-test", "3xa100", "offline"],
+    "num_steps": 180
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_train_instances.jsonl",
+    "pretrained_backbone": null,
+    "init_checkpoint": null,
+    "lr": 1.52587890625e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 30,
+    "max_segments_per_image": 4,
+    "sample_multiple_segments_per_image": true,
+    "effective_batch_size": 48,
+    "target_batch_schedule": {
+      "0": 48
+    },
+    "focal_weight": 20.0,
+    "dice_weight": 1.0,
+    "iou_weight": 0.01,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "prompt_noise_std": 0.0
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "coco2017_val": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_val_instances.jsonl"
+    },
+    "max_examples": 128,
+    "threshold": 0.0
+  },
+  "assumptions": [
+    "3x A100 stage test intended to exercise startup, repeated training, checkpointing, and repeated eval within roughly an hour.",
+    "Starts from random SAM ViT-B weights; this is a systems test, not a quality run."
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "model": {
+    "size": "vit_b",
+    "image_size": 1024
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/runs/sam_vit_b_official_eval_coco_val",
+    "profile_name": "sam_vit_b_official_eval_coco_val",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "distributed": false,
+    "num_workers": 4,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 600,
+    "wandb_enabled": false,
+    "num_steps": 1
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "coco2017_val": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_val_instances.jsonl"
+    },
+    "max_examples": 1000,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  },
+  "assumptions": [
+    "Evaluates the official SAM ViT-B checkpoint on COCO val with the same prompt protocol and original-image-space IoU computation.",
+    "Uses SAM's native 1024x1024 input resolution."
+  ]
+}
