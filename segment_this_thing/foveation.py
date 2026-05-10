@@ -445,32 +445,43 @@ class LogRectilinearFoveator(torch.nn.Module):
         self.register_buffer("bin_area", bin_area, persistent=False)
 
     def _scaled_log_rect(self, t: float) -> float:
+        """Paper-style log-rectilinear normalized radial mapping."""
         linear = t
         nonlinear = (math.exp(t**self.exponent) - 1.0) / (math.e - 1.0)
         return max(linear, nonlinear)
 
     def _build_axis_edges(self) -> list[int]:
-        radius = self.pattern_size // 2
-        center = radius
-        side_bins = (self.axis_bins - 1) // 2
-        half_center = self.center_width // 2
+        """Build true log-rectilinear crop-space bin edges.
 
-        if half_center < 1 or half_center >= radius:
-            raise ValueError("[LogRectilinearFoveator]: center_width must be in [2, pattern_size).")
+        The previous Zaratan implementation interpolated almost linearly across
+        the 1280-pixel crop, producing a weak foveation. Here we follow the
+        log-rectilinear buffer-to-crop mapping from Li et al.: a small
+        axis-aligned buffer of ``axis_bins * token_size`` pixels is mapped to
+        the full prompt-centered crop with an identity foveal band and
+        exponentially larger peripheral bins. With the default settings this
+        yields widths close to [390, 153, 41, 16, ..., 153, 391].
+        """
+        if self.axis_bins * self.token_size <= 0:
+            raise ValueError("[LogRectilinearFoveator]: invalid axis_bins/token_size.")
 
-        distances = [half_center]
-        for index in range(1, side_bins):
-            t = index / side_bins
-            offset = half_center + (radius - half_center) * self._scaled_log_rect(t)
-            distances.append(offset)
-        distances.append(radius)
-        distances = _strictly_increasing_ints(distances, half_center, radius)
+        crop_half = self.pattern_size / 2.0
+        buffer_size = self.axis_bins * self.token_size
+        buffer_half = buffer_size / 2.0
+        lam = crop_half / (math.e - 1.0)
 
-        edges = [0]
-        edges.extend(center - distance for distance in reversed(distances[:-1]))
-        edges.append(center + distances[0])
-        edges.extend(center + distance for distance in distances[1:-1])
-        edges.append(self.pattern_size)
+        edges: list[int] = []
+        for boundary_index in range(self.axis_bins + 1):
+            du = boundary_index * self.token_size - buffer_half
+            ad = abs(du)
+            if ad < 1e-9:
+                dx = 0.0
+            else:
+                exp_term = lam * (math.exp((ad / buffer_half) ** self.exponent) - 1.0)
+                dx = max(ad, exp_term) * (1.0 if du > 0 else -1.0)
+            edges.append(int(math.floor(crop_half + dx)))
+
+        edges[0] = 0
+        edges[-1] = self.pattern_size
         return _strictly_increasing_ints(edges, 0, self.pattern_size)
 
     def get_pattern_bounds_size(self) -> int:

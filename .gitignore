@@ -3,3 +3,8 @@ segment_this_thing.egg-info
 ._*
 __pycache__/
 runs/
+artifacts/
+slurm/
+data/
+wandb/
+*.pyc
