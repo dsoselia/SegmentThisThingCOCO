@@ -6,9 +6,7 @@ REPO="${REPO:-$ROOT/segment_this_thing}"
 ENV_NAME="${ENV_NAME:-stt-logrect2-gb10}"
 SMOKE_ENCODER="$ROOT/artifacts/stt_b_coco_log_rect2_gb10_smoke_final_encoder.pt"
 
-if ! command -v conda >/dev/null 2>&1; then
-  source /home/dsoselia/miniforge3/etc/profile.d/conda.sh
-fi
+source /home/dsoselia/miniforge3/etc/profile.d/conda.sh
 conda activate "$ENV_NAME"
 
 export WANDB_MODE=offline

@@ -8,9 +8,7 @@ BASE_ENV="${BASE_ENV:-sam-ft}"
 
 mkdir -p "$ROOT"/{runs,artifacts,logs,data/coco2017/manifests}
 
-if ! command -v conda >/dev/null 2>&1; then
-  source /home/dsoselia/miniforge3/etc/profile.d/conda.sh
-fi
+source /home/dsoselia/miniforge3/etc/profile.d/conda.sh
 
 if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
   conda create -y -n "$ENV_NAME" --clone "$BASE_ENV"
