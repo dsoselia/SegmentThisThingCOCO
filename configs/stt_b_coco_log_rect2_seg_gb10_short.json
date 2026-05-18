@@ -1,0 +1,85 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "log_rect_box",
+    "log_rect_axis_bins": 13,
+    "log_rect_exponent": 4.0,
+    "log_rect_center_width": 16
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/SegmentThisThingLogRect2GB10/runs/short_log_rect2_seg_gb10",
+    "profile_name": "short_log_rect2_seg_gb10",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 2,
+    "num_interop_threads": 1,
+    "distributed": false,
+    "backend": "nccl",
+    "micro_batch_size": 1,
+    "num_workers": 2,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 600,
+    "save_every": 250,
+    "log_every": 20,
+    "eval_every": 250,
+    "resume_from": null,
+    "checkpoint_keep_last": 4,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "SegmentThisThingLogRect2GB10",
+    "wandb_mode": "offline",
+    "wandb_tags": [
+      "stt",
+      "segmentation",
+      "coco",
+      "log-rect2",
+      "true-logrect",
+      "gb10",
+      "short",
+      "offline"
+    ],
+    "num_steps": 1000
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/SegmentThisThingLogRect2GB10/data/coco2017/manifests/coco2017_train_instances.jsonl",
+    "pretrained_encoder": "/home/dsoselia/SegmentThisThingLogRect2GB10/artifacts/stt_b_coco_log_rect2_gb10_short_final_encoder.pt",
+    "init_checkpoint": null,
+    "lr": 1.52587890625e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 1000,
+    "margin": 256,
+    "max_segments_per_image": 16,
+    "sample_multiple_segments_per_image": true,
+    "effective_batch_size": 8,
+    "target_batch_schedule": {
+      "0": 8
+    },
+    "focal_weight": 20.0,
+    "dice_weight": 1.0,
+    "iou_weight": 0.01,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "prompt_noise_std": 0.0
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "coco2017_val": "/home/dsoselia/SegmentThisThingLogRect2GB10/data/coco2017/manifests/coco2017_val_instances.jsonl"
+    },
+    "max_examples": 100,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  }
+}
