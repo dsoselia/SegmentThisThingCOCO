@@ -15,11 +15,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from .config import ExperimentConfig
-from .data import MAETrainingManifestDataset, SegmentationBatch, SegmentationTrainingManifestDataset, collate_samples, collate_segmentation_samples
+from .data import MAETrainingManifestDataset, Sample, SegmentationBatch, SegmentationTrainingManifestDataset, collate_samples, collate_segmentation_samples
 from .evaluate import evaluate_checkpoint
 from .losses import multimask_segmentation_loss
 from .mae import FoveatedMAE
-from .modeling import build_foveator, build_model, load_checkpoint, save_checkpoint
+from .modeling import attach_foveator_if_learnable, build_foveator, build_model, load_checkpoint, save_checkpoint
 from .runtime import (
     DistributedContext,
     append_jsonl,
@@ -71,6 +71,7 @@ def _build_loader(
     prompt_noise_std: float = 0.0,
     sample_multiple_segments_per_image: bool = False,
 ) -> tuple[DataLoader, DistributedSampler | None]:
+    raw_segmentation_samples = bool(task == "segmentation" and getattr(model_config, "log_rect_learnable", False))
     if task == "segmentation":
         dataset = SegmentationTrainingManifestDataset(
             manifest_path=manifest,
@@ -80,8 +81,9 @@ def _build_loader(
             seed=runtime.seed + ctx.rank * 100_000,
             prompt_noise_std=prompt_noise_std,
             sample_multiple_segments_per_image=sample_multiple_segments_per_image,
+            raw_samples=raw_segmentation_samples,
         )
-        collate_fn = collate_segmentation_samples
+        collate_fn = collate_samples if raw_segmentation_samples else collate_segmentation_samples
     else:
         dataset = MAETrainingManifestDataset(
             manifest_path=manifest,
@@ -117,6 +119,66 @@ def _build_loader(
     if _loader_supports("in_order"):
         kwargs["in_order"] = runtime.dataloader_in_order
     return DataLoader(**kwargs), sampler
+
+
+def _flatten_samples(samples: list[Sample | list[Sample]]) -> list[Sample]:
+    flat_samples: list[Sample] = []
+    for sample in samples:
+        if isinstance(sample, list):
+            flat_samples.extend(sample)
+        else:
+            flat_samples.append(sample)
+    return flat_samples
+
+
+def _build_learnable_segmentation_tensors(
+    samples: list[Sample | list[Sample]],
+    *,
+    foveator,
+    device: torch.device,
+    pin_memory: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float], int]:
+    flat_samples = _flatten_samples(samples)
+    token_batch = []
+    valid_batch = []
+    target_batch = []
+    preprocessing = {
+        "image_decode_time": 0.0,
+        "mask_decode_time": 0.0,
+        "prompt_sample_time": 0.0,
+        "foveation_build_time": 0.0,
+        "target_projection_time": 0.0,
+        "host_to_device_time": 0.0,
+        "valid_token_count": 0.0,
+    }
+    for sample in flat_samples:
+        preprocessing["image_decode_time"] += float(sample.preprocessing.get("image_decode_time", 0.0))
+        preprocessing["mask_decode_time"] += float(sample.preprocessing.get("mask_decode_time", 0.0))
+        preprocessing["prompt_sample_time"] += float(sample.preprocessing.get("prompt_sample_time", 0.0))
+        host_to_device_start = time.time()
+        image = sample.image.to(device, non_blocking=pin_memory)
+        mask = sample.mask.to(device, non_blocking=pin_memory)
+        center = sample.center.to(device, non_blocking=pin_memory)
+        preprocessing["host_to_device_time"] += time.time() - host_to_device_start
+
+        foveation_start = time.time()
+        tokens, valid_mask, _ = build_model_inputs(image, center, foveator)
+        preprocessing["foveation_build_time"] += time.time() - foveation_start
+        target_start = time.time()
+        target, _ = project_mask_to_foveation(foveator, mask, center)
+        preprocessing["target_projection_time"] += time.time() - target_start
+        preprocessing["valid_token_count"] += float(valid_mask.sum().detach().cpu())
+        token_batch.append(tokens)
+        valid_batch.append(valid_mask)
+        target_batch.append(target)
+
+    return (
+        torch.stack(token_batch).float(),
+        torch.stack(valid_batch).bool(),
+        torch.stack(target_batch).float(),
+        preprocessing,
+        len(flat_samples),
+    )
 
 
 def _normalize_tokens(tokens: torch.Tensor) -> torch.Tensor:
@@ -398,6 +460,8 @@ def _record_training_metrics(
     summary.update(_mean_metrics(batch_metrics))
     if extra_metrics:
         summary.update(extra_metrics)
+    if hasattr(foveator, "get_learned_warp_metrics"):
+        summary.update(foveator.get_learned_warp_metrics())
     summary["open_file_descriptors"] = get_open_file_descriptor_count() or 0
     summary.update(gpu_memory_snapshot(device))
     append_jsonl(metrics_path, summary)
@@ -442,30 +506,42 @@ def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
     )
     foveator = build_foveator(config.model).to(device)
     model = build_model(config.model.size, foveator).to(device).eval()
+    model = attach_foveator_if_learnable(model, foveator)
     if config.segmentation.init_checkpoint:
         load_checkpoint(model, config.segmentation.init_checkpoint, strict=True)
     iterator = iter(loader)
     batch = next(iterator)
-    tokens = batch.tokens.to(device, non_blocking=config.runtime.pin_memory)
-    valid_masks = batch.valid_masks.to(device, non_blocking=config.runtime.pin_memory)
-    target = batch.target_masks.to(device, non_blocking=config.runtime.pin_memory)
+    if config.model.log_rect_learnable:
+        tokens, valid_masks, target, preprocessing, _ = _build_learnable_segmentation_tensors(
+            batch,
+            foveator=foveator,
+            device=device,
+            pin_memory=config.runtime.pin_memory,
+        )
+        center = _flatten_samples(batch)[0].center.tolist()
+    else:
+        tokens = batch.tokens.to(device, non_blocking=config.runtime.pin_memory)
+        valid_masks = batch.valid_masks.to(device, non_blocking=config.runtime.pin_memory)
+        target = batch.target_masks.to(device, non_blocking=config.runtime.pin_memory)
+        preprocessing = batch.preprocessing
+        center = batch.centers[0].tolist()
     pred_masks, pred_iou = model(_normalize_tokens(tokens), valid_masks)
     return {
         "manifest": config.segmentation.train_manifest,
         "dataset_len": len(loader.dataset),
         "batch_len": int(tokens.shape[0]),
-        "center": batch.centers[0].tolist(),
+        "center": center,
         "tokens_shape": list(tokens.shape[1:]),
         "target_shape": list(target.shape[1:]),
         "pred_masks_shape": list(pred_masks.shape),
         "pred_iou_shape": list(pred_iou.shape),
         "device": str(device),
         "tokenizer_type": config.model.tokenizer_type,
-        "image_decode_time": batch.preprocessing.get("image_decode_time"),
-        "mask_decode_time": batch.preprocessing.get("mask_decode_time"),
-        "prompt_sample_time": batch.preprocessing.get("prompt_sample_time"),
-        "foveation_build_time": batch.preprocessing.get("foveation_build_time"),
-        "target_projection_time": batch.preprocessing.get("target_projection_time"),
+        "image_decode_time": preprocessing.get("image_decode_time"),
+        "mask_decode_time": preprocessing.get("mask_decode_time"),
+        "prompt_sample_time": preprocessing.get("prompt_sample_time"),
+        "foveation_build_time": preprocessing.get("foveation_build_time"),
+        "target_projection_time": preprocessing.get("target_projection_time"),
         "startup_elapsed_s": round(time.time() - startup_started_at, 3),
     }
 
@@ -734,6 +810,7 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
             )
         foveator = build_foveator(config.model).to(device)
         model = build_model(config.model.size, foveator).to(device)
+        model = attach_foveator_if_learnable(model, foveator)
         if config.segmentation.init_checkpoint and not config.runtime.resume_from:
             load_checkpoint(model, config.segmentation.init_checkpoint, strict=True)
         if config.segmentation.pretrained_encoder and not config.runtime.resume_from:
@@ -741,7 +818,18 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
             encoder_state = state["model"] if isinstance(state, dict) and "model" in state else state
             model.image_encoder.load_state_dict(encoder_state, strict=False)
         model = _maybe_wrap_ddp(model, device, ctx)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config.segmentation.lr, weight_decay=config.segmentation.weight_decay)
+        if config.model.log_rect_learnable:
+            warp_param_ids = {id(param) for param in foveator.parameters() if param.requires_grad}
+            model_params = [param for param in model.parameters() if param.requires_grad and id(param) not in warp_param_ids]
+            warp_params = [param for param in foveator.parameters() if param.requires_grad]
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": model_params, "lr": config.segmentation.lr, "weight_decay": config.segmentation.weight_decay},
+                    {"params": warp_params, "lr": config.segmentation.log_rect_warp_lr, "weight_decay": 0.0},
+                ]
+            )
+        else:
+            optimizer = torch.optim.AdamW(model.parameters(), lr=config.segmentation.lr, weight_decay=config.segmentation.weight_decay)
         scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and amp_dtype == torch.float16)
         epoch = 0
         iterator = _build_iterator(loader, sampler, epoch)
@@ -794,6 +882,7 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                 data_time += batch_fetch_time
                 batch_fetch_total += batch_fetch_time
                 if step == start_step and ctx.is_main_process:
+                    fetched_batch_len = len(_flatten_samples(batch)) if config.model.log_rect_learnable else batch.tokens.shape[0]
                     _mark_startup_stage(
                         run_dir,
                         config,
@@ -801,22 +890,37 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                         phase="segmentation",
                         step=step,
                         stage="first_batch_fetched",
-                        detail=_startup_detail(startup_started_at, f"batch_len={batch.tokens.shape[0]}"),
+                        detail=_startup_detail(startup_started_at, f"batch_len={fetched_batch_len}"),
                     )
 
                 compute_start = time.time()
-                host_to_device_start = time.time()
-                image_tokens = batch.tokens.to(device, non_blocking=config.runtime.pin_memory)
-                valid_masks = batch.valid_masks.to(device, non_blocking=config.runtime.pin_memory)
-                target_masks = batch.target_masks.to(device, non_blocking=config.runtime.pin_memory)
-                host_to_device_time = time.time() - host_to_device_start
-                host_to_device_total += host_to_device_time
-                image_decode_total += float(batch.preprocessing.get("image_decode_time", 0.0))
-                mask_decode_total += float(batch.preprocessing.get("mask_decode_time", 0.0))
-                prompt_sample_total += float(batch.preprocessing.get("prompt_sample_time", 0.0))
-                foveation_build_total += float(batch.preprocessing.get("foveation_build_time", 0.0))
-                target_projection_total += float(batch.preprocessing.get("target_projection_time", 0.0))
-                valid_token_total += float(batch.preprocessing.get("valid_token_count", 0.0))
+                if config.model.log_rect_learnable:
+                    image_tokens, valid_masks, target_masks, preprocessing, actual_segments = _build_learnable_segmentation_tensors(
+                        batch,
+                        foveator=foveator,
+                        device=device,
+                        pin_memory=config.runtime.pin_memory,
+                    )
+                    host_to_device_total += float(preprocessing.get("host_to_device_time", 0.0))
+                    image_decode_total += float(preprocessing.get("image_decode_time", 0.0))
+                    mask_decode_total += float(preprocessing.get("mask_decode_time", 0.0))
+                    prompt_sample_total += float(preprocessing.get("prompt_sample_time", 0.0))
+                    foveation_build_total += float(preprocessing.get("foveation_build_time", 0.0))
+                    target_projection_total += float(preprocessing.get("target_projection_time", 0.0))
+                    valid_token_total += float(preprocessing.get("valid_token_count", 0.0))
+                else:
+                    host_to_device_start = time.time()
+                    image_tokens = batch.tokens.to(device, non_blocking=config.runtime.pin_memory)
+                    valid_masks = batch.valid_masks.to(device, non_blocking=config.runtime.pin_memory)
+                    target_masks = batch.target_masks.to(device, non_blocking=config.runtime.pin_memory)
+                    host_to_device_time = time.time() - host_to_device_start
+                    host_to_device_total += host_to_device_time
+                    image_decode_total += float(batch.preprocessing.get("image_decode_time", 0.0))
+                    mask_decode_total += float(batch.preprocessing.get("mask_decode_time", 0.0))
+                    prompt_sample_total += float(batch.preprocessing.get("prompt_sample_time", 0.0))
+                    foveation_build_total += float(batch.preprocessing.get("foveation_build_time", 0.0))
+                    target_projection_total += float(batch.preprocessing.get("target_projection_time", 0.0))
+                    valid_token_total += float(batch.preprocessing.get("valid_token_count", 0.0))
 
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
                     pred_masks, pred_iou = model(_normalize_tokens(image_tokens), valid_masks)
@@ -962,6 +1066,7 @@ def run_benchmark(config: ExperimentConfig) -> dict:
     device = get_device(config.runtime.device)
     foveator = build_foveator(config.model).to(device)
     model = build_model(config.model.size, foveator).to(device).eval()
+    model = attach_foveator_if_learnable(model, foveator)
     if config.benchmark.checkpoint:
         load_checkpoint(model, config.benchmark.checkpoint, strict=True)
     image = torch.randint(0, 255, (config.benchmark.image_size, config.benchmark.image_size, 3), dtype=torch.uint8, device=device)

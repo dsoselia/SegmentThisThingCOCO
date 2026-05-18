@@ -195,6 +195,7 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
         seed: int = 1337,
         prompt_noise_std: float = 0.0,
         sample_multiple_segments_per_image: bool = False,
+        raw_samples: bool = False,
     ):
         self.manifest = IndexedJsonl(manifest_path)
         self.manifest_path = str(manifest_path)
@@ -204,6 +205,7 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
         self.seed = seed
         self.prompt_noise_std = prompt_noise_std
         self.sample_multiple_segments_per_image = sample_multiple_segments_per_image
+        self.raw_samples = raw_samples
         self._foveator = None
 
     def __len__(self) -> int:
@@ -241,7 +243,7 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
         segments = entry["segments"]
         rng = random.Random(worker_seed + self.seed + index * 9973)
         selected_segments = self._sample_segments(segments, rng)
-        foveator = self._get_foveator()
+        foveator = None if self.raw_samples else self._get_foveator()
         from .transforms import build_model_inputs, project_mask_to_foveation
 
         samples: list[Sample] = []
@@ -264,6 +266,19 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
             center[0] = center[0].clamp(0, image.shape[1] - 1)
             center[1] = center[1].clamp(0, image.shape[0] - 1)
             timings["prompt_sample_time"] = time.perf_counter() - prompt_start
+
+            if self.raw_samples:
+                samples.append(
+                    Sample(
+                        image=image,
+                        mask=mask,
+                        center=center,
+                        dataset_name=entry.get("dataset_name", "sa1b"),
+                        image_path=image_path,
+                        preprocessing=timings,
+                    )
+                )
+                continue
 
             foveation_start = time.perf_counter()
             tokens, valid_mask, _ = build_model_inputs(image, center, foveator)

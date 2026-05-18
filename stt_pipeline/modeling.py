@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 import segment_this_thing
-from segment_this_thing import Foveator, LogRectilinearFoveator
+from segment_this_thing import Foveator, LearnableLogRectilinearFoveator, LogRectilinearFoveator
 
 from .config import ModelConfig
 from .runtime import get_rng_state, unwrap_model
@@ -19,7 +19,7 @@ def _default_pattern_size(model_config: ModelConfig) -> int:
     return model_config.token_size * model_config.strides[-1] * model_config.grid_sizes[-1]
 
 
-def build_foveator(model_config: ModelConfig) -> Foveator | LogRectilinearFoveator:
+def build_foveator(model_config: ModelConfig) -> Foveator | LogRectilinearFoveator | LearnableLogRectilinearFoveator:
     if model_config.tokenizer_type == "stt_ring":
         return Foveator(
             token_size=model_config.token_size,
@@ -29,6 +29,19 @@ def build_foveator(model_config: ModelConfig) -> Foveator | LogRectilinearFoveat
     if model_config.tokenizer_type == "log_rect_box":
         if model_config.log_rect_axis_bins is None:
             raise ValueError("log_rect_box requires model.log_rect_axis_bins to be set")
+        if model_config.log_rect_learnable:
+            return LearnableLogRectilinearFoveator(
+                token_size=model_config.token_size,
+                pattern_size=_default_pattern_size(model_config),
+                axis_bins=model_config.log_rect_axis_bins,
+                exponent_init=model_config.log_rect_exponent,
+                center_width=model_config.log_rect_center_width,
+                learn_scale=model_config.log_rect_learn_scale,
+                exponent_min=model_config.log_rect_exponent_min,
+                exponent_max=model_config.log_rect_exponent_max,
+                scale_min=model_config.log_rect_scale_min,
+                scale_max=model_config.log_rect_scale_max,
+            )
         return LogRectilinearFoveator(
             token_size=model_config.token_size,
             pattern_size=_default_pattern_size(model_config),
@@ -39,9 +52,15 @@ def build_foveator(model_config: ModelConfig) -> Foveator | LogRectilinearFoveat
     raise ValueError(f"Unsupported tokenizer_type: {model_config.tokenizer_type}")
 
 
-def build_model(size: str, foveator: Foveator | LogRectilinearFoveator):
+def build_model(size: str, foveator: Foveator | LogRectilinearFoveator | LearnableLogRectilinearFoveator):
     builder = getattr(segment_this_thing, f"build_segment_this_thing_{size}")
     return builder(num_tokens=foveator.get_num_tokens(), token_size=foveator.token_size)
+
+
+def attach_foveator_if_learnable(model: torch.nn.Module, foveator: torch.nn.Module) -> torch.nn.Module:
+    if any(param.requires_grad for param in foveator.parameters()):
+        model.foveator = foveator
+    return model
 
 
 def load_checkpoint(

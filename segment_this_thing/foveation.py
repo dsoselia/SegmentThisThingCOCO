@@ -554,3 +554,234 @@ class LogRectilinearFoveator(torch.nn.Module):
                     output[:, y0:y1, x0:x1] = source[token_index, :, row, col].view(-1, 1, 1)
 
         return output
+
+
+def _inverse_bounded_sigmoid(value: float, lower: float, upper: float) -> float:
+    if not lower < upper:
+        raise ValueError("Expected lower bound to be smaller than upper bound.")
+    normalized = (float(value) - lower) / (upper - lower)
+    normalized = min(max(normalized, 1e-6), 1.0 - 1e-6)
+    return math.log(normalized / (1.0 - normalized))
+
+
+def _continuous_integral_sample(integral_image: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+    """Bilinearly sample an integral image at continuous (x, y) coordinates."""
+    height = integral_image.shape[-2] - 1
+    width = integral_image.shape[-1] - 1
+    output_shape = coords.shape[:-1]
+    x = coords[..., 0].clamp(0.0, float(width))
+    y = coords[..., 1].clamp(0.0, float(height))
+    grid = torch.stack(
+        [
+            (2.0 * x / max(float(width), 1.0)) - 1.0,
+            (2.0 * y / max(float(height), 1.0)) - 1.0,
+        ],
+        dim=-1,
+    )
+    grid = grid.reshape(1, -1, 1, 2)
+    sampled = torch.nn.functional.grid_sample(
+        integral_image.unsqueeze(0),
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )
+    return sampled.squeeze(0).squeeze(-1).transpose(0, 1).reshape(*output_shape, integral_image.shape[0])
+
+
+class LearnableLogRectilinearFoveator(torch.nn.Module):
+    """
+    Differentiable log-rectilinear foveator with globally learnable warp scalars.
+
+    The token count and token tensor shape match ``LogRectilinearFoveator``. Unlike
+    the fixed implementation, the box boundaries are continuous functions of
+    learnable exponent and scale parameters, so losses can backpropagate into the
+    global warp.
+    """
+
+    def __init__(
+        self,
+        token_size: int,
+        pattern_size: int,
+        axis_bins: int,
+        exponent_init: float = 4.0,
+        center_width: int | None = None,
+        learn_scale: bool = True,
+        exponent_min: float = 1.0,
+        exponent_max: float = 8.0,
+        scale_min: float = 0.25,
+        scale_max: float = 4.0,
+    ) -> None:
+        super().__init__()
+        if axis_bins < 3 or axis_bins % 2 == 0:
+            raise ValueError("[LearnableLogRectilinearFoveator]: axis_bins must be an odd integer >= 3.")
+        if pattern_size <= 0 or pattern_size % 2 != 0:
+            raise ValueError("[LearnableLogRectilinearFoveator]: pattern_size must be a positive even integer.")
+        self.token_size = token_size
+        self.pattern_size = pattern_size
+        self.axis_bins = axis_bins
+        self.center_width = center_width or token_size
+        self.learn_scale = learn_scale
+        self.exponent_min = float(exponent_min)
+        self.exponent_max = float(exponent_max)
+        self.scale_min = float(scale_min)
+        self.scale_max = float(scale_max)
+
+        self.raw_exponent = torch.nn.Parameter(
+            torch.tensor(_inverse_bounded_sigmoid(exponent_init, self.exponent_min, self.exponent_max), dtype=torch.float32)
+        )
+        raw_scale_init = torch.tensor(_inverse_bounded_sigmoid(1.0, self.scale_min, self.scale_max), dtype=torch.float32)
+        if learn_scale:
+            self.raw_scale = torch.nn.Parameter(raw_scale_init)
+        else:
+            self.register_buffer("raw_scale", raw_scale_init, persistent=True)
+
+        grid = torch.arange(token_size + 1, dtype=torch.float32) / float(token_size)
+        self.register_buffer("bin_fraction_edges", grid, persistent=False)
+
+    @property
+    def exponent(self) -> torch.Tensor:
+        return self.exponent_min + (self.exponent_max - self.exponent_min) * torch.sigmoid(self.raw_exponent)
+
+    @property
+    def scale(self) -> torch.Tensor:
+        return self.scale_min + (self.scale_max - self.scale_min) * torch.sigmoid(self.raw_scale)
+
+    def get_pattern_bounds_size(self) -> int:
+        return self.pattern_size
+
+    def get_num_tokens(self) -> int:
+        return self.axis_bins * self.axis_bins
+
+    def _axis_edges(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        crop_half = torch.tensor(self.pattern_size / 2.0, device=device, dtype=dtype)
+        buffer_size = torch.tensor(self.axis_bins * self.token_size, device=device, dtype=dtype)
+        buffer_half = buffer_size / 2.0
+        boundary = torch.arange(self.axis_bins + 1, device=device, dtype=dtype)
+        du = boundary * float(self.token_size) - buffer_half
+        t = (du.abs() / buffer_half).clamp(0.0, 1.0)
+        linear_crop = (du.abs() / crop_half).clamp(0.0, 1.0)
+        nonlinear = (torch.exp(t.pow(self.exponent.to(device=device, dtype=dtype))) - 1.0) / (math.e - 1.0)
+        scale = self.scale.to(device=device, dtype=dtype)
+        mapped = torch.maximum(linear_crop, scale * nonlinear) / torch.maximum(scale, torch.ones_like(scale))
+        dx = mapped * crop_half * du.sign()
+        edges = crop_half + dx
+        edges = edges.clamp(0.0, float(self.pattern_size))
+        edges = torch.cat([edges[:1].new_zeros(1), edges[1:-1], edges[-1:].new_full((1,), float(self.pattern_size))])
+        return edges
+
+    def _token_boxes(self, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        edges = self._axis_edges(device=device, dtype=dtype)
+        x0, x1 = edges[:-1], edges[1:]
+        y0, y1 = edges[:-1], edges[1:]
+        yy0, xx0 = torch.meshgrid(y0, x0, indexing="ij")
+        yy1, xx1 = torch.meshgrid(y1, x1, indexing="ij")
+        return torch.stack([xx0, yy0, xx1, yy1], dim=-1).reshape(-1, 4)
+
+    def _bin_corners(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        boxes = self._token_boxes(device=device, dtype=dtype)
+        fractions = self.bin_fraction_edges.to(device=device, dtype=dtype)
+        x_edges = boxes[:, 0:1] + (boxes[:, 2:3] - boxes[:, 0:1]) * fractions.view(1, -1)
+        y_edges = boxes[:, 1:2] + (boxes[:, 3:4] - boxes[:, 1:2]) * fractions.view(1, -1)
+        x0 = x_edges[:, :-1].unsqueeze(1).expand(-1, self.token_size, -1)
+        x1 = x_edges[:, 1:].unsqueeze(1).expand(-1, self.token_size, -1)
+        y0 = y_edges[:, :-1].unsqueeze(2).expand(-1, -1, self.token_size)
+        y1 = y_edges[:, 1:].unsqueeze(2).expand(-1, -1, self.token_size)
+        lower = torch.stack([x0, y0], dim=-1)
+        upper = torch.stack([x1, y1], dim=-1)
+        area = ((x1 - x0) * (y1 - y0)).clamp(min=1e-6)
+        return lower, upper, area
+
+    def extract_foveated_image(self, images: torch.Tensor) -> torch.Tensor:
+        if images.ndim != 3:
+            raise ValueError("[LearnableLogRectilinearFoveator.extract_foveated_image]: Expected 3D input Tensor.")
+        if images.shape[-2] != self.pattern_size or images.shape[-1] != self.pattern_size:
+            raise ValueError(
+                f"[LearnableLogRectilinearFoveator.extract_foveated_image]: Expected square image of size {self.pattern_size}"
+            )
+        if images.shape[-3] != 3:
+            raise ValueError("[LearnableLogRectilinearFoveator.extract_foveated_image]: Expected 3-channel image.")
+
+        source = images.float()
+        integral_image = torch.nn.functional.pad(source, (1, 0, 1, 0), mode="constant", value=0.0).cumsum(dim=2).cumsum(dim=1)
+        lower, upper, area = self._bin_corners(device=source.device, dtype=source.dtype)
+        lower_x_upper_y = torch.stack([lower[..., 0], upper[..., 1]], dim=-1)
+        upper_x_lower_y = torch.stack([upper[..., 0], lower[..., 1]], dim=-1)
+        summed = (
+            _continuous_integral_sample(integral_image, upper)
+            - _continuous_integral_sample(integral_image, lower_x_upper_y)
+            - _continuous_integral_sample(integral_image, upper_x_lower_y)
+            + _continuous_integral_sample(integral_image, lower)
+        )
+        return (summed / area.unsqueeze(-1)).permute(0, 3, 1, 2)
+
+    def extract_scalar_foveation(self, scalar_image: torch.Tensor) -> torch.Tensor:
+        if scalar_image.ndim != 2:
+            raise ValueError(
+                f"[LearnableLogRectilinearFoveator.extract_scalar_foveation]: Expected scalar image with shape (H, W), got {tuple(scalar_image.shape)}"
+            )
+        source = scalar_image.float().unsqueeze(0)
+        integral_image = torch.nn.functional.pad(source, (1, 0, 1, 0), mode="constant", value=0.0).cumsum(dim=2).cumsum(dim=1)
+        lower, upper, area = self._bin_corners(device=source.device, dtype=source.dtype)
+        lower_x_upper_y = torch.stack([lower[..., 0], upper[..., 1]], dim=-1)
+        upper_x_lower_y = torch.stack([upper[..., 0], lower[..., 1]], dim=-1)
+        summed = (
+            _continuous_integral_sample(integral_image, upper)
+            - _continuous_integral_sample(integral_image, lower_x_upper_y)
+            - _continuous_integral_sample(integral_image, upper_x_lower_y)
+            + _continuous_integral_sample(integral_image, lower)
+        ).squeeze(-1)
+        return (summed / area).unsqueeze(1)
+
+    def get_in_bounds_tokens(
+        self,
+        image_size: torch.Tensor,
+        crop_bounds: torch.Tensor,
+        in_bounds_threshold: float = 0.0,
+    ) -> torch.Tensor:
+        box_coords = self._token_boxes(device=crop_bounds.device, dtype=torch.float32)
+        lower = crop_bounds[0].float() + box_coords[:, :2]
+        upper = crop_bounds[0].float() + box_coords[:, 2:]
+        bounded_lower = lower.clamp(min=0.0)
+        bounded_upper = torch.minimum(upper, image_size.float())
+        in_bounds_area = ((bounded_upper - bounded_lower).clamp(min=0.0).prod(dim=-1)).float()
+        total_area = ((box_coords[:, 2:] - box_coords[:, :2]).prod(dim=-1)).float()
+        return (in_bounds_area / total_area.clamp(min=1.0)) > in_bounds_threshold
+
+    def generate_foveated_visualization(self, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.ndim != 4:
+            raise ValueError(
+                "[LearnableLogRectilinearFoveator.generate_foveated_visualization]: Expected 4D input Tensor (N, C, H, W)."
+            )
+        if tokens.shape[0] != self.get_num_tokens():
+            raise ValueError(
+                f"[LearnableLogRectilinearFoveator.generate_foveated_visualization]: Expected {self.get_num_tokens()} tokens"
+            )
+        output = torch.zeros((tokens.shape[1], self.pattern_size, self.pattern_size), dtype=tokens.dtype)
+        lower, upper, _ = self._bin_corners(device=torch.device("cpu"), dtype=torch.float32)
+        source = tokens.cpu()
+        for token_index in range(source.shape[0]):
+            for row in range(self.token_size):
+                for col in range(self.token_size):
+                    x0 = int(torch.floor(lower[token_index, row, col, 0]).item())
+                    y0 = int(torch.floor(lower[token_index, row, col, 1]).item())
+                    x1 = int(torch.ceil(upper[token_index, row, col, 0]).item())
+                    y1 = int(torch.ceil(upper[token_index, row, col, 1]).item())
+                    x0 = max(0, min(x0, self.pattern_size - 1))
+                    y0 = max(0, min(y0, self.pattern_size - 1))
+                    x1 = max(x0 + 1, min(x1, self.pattern_size))
+                    y1 = max(y0 + 1, min(y1, self.pattern_size))
+                    output[:, y0:y1, x0:x1] = source[token_index, :, row, col].view(-1, 1, 1)
+        return output
+
+    def get_learned_warp_metrics(self) -> dict[str, float]:
+        metrics = {
+            "log_rect_exponent": float(self.exponent.detach().cpu()),
+            "log_rect_scale": float(self.scale.detach().cpu()),
+        }
+        if self.raw_exponent.grad is not None:
+            metrics["log_rect_raw_exponent_grad"] = float(self.raw_exponent.grad.detach().abs().cpu())
+        raw_scale = getattr(self, "raw_scale", None)
+        if isinstance(raw_scale, torch.nn.Parameter) and raw_scale.grad is not None:
+            metrics["log_rect_raw_scale_grad"] = float(raw_scale.grad.detach().abs().cpu())
+        return metrics

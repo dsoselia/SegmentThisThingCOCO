@@ -17,6 +17,12 @@ class ModelConfig:
     log_rect_axis_bins: int | None = None
     log_rect_exponent: float = 4.0
     log_rect_center_width: int | None = None
+    log_rect_learnable: bool = False
+    log_rect_learn_scale: bool = True
+    log_rect_exponent_min: float = 1.0
+    log_rect_exponent_max: float = 8.0
+    log_rect_scale_min: float = 0.25
+    log_rect_scale_max: float = 4.0
     num_masks: int = 3
 
 
@@ -101,6 +107,7 @@ class SegmentationConfig:
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
     prompt_noise_std: float = 0.0
+    log_rect_warp_lr: float = 1e-6
 
 
 @dataclass

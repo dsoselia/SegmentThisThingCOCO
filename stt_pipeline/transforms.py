@@ -37,6 +37,8 @@ def _compute_integral_map(values: torch.Tensor) -> torch.Tensor:
 def extract_scalar_foveation(foveator, scalar_image: torch.Tensor) -> torch.Tensor:
     if scalar_image.ndim != 2:
         raise ValueError(f"Expected scalar image with shape (H, W), got {tuple(scalar_image.shape)}")
+    if hasattr(foveator, "extract_scalar_foveation"):
+        return foveator.extract_scalar_foveation(scalar_image)
     device = scalar_image.device
     integral = _compute_integral_map(scalar_image)
     if hasattr(foveator, "bin_lower_pixel_coords") and hasattr(foveator, "bin_upper_pixel_coords"):
