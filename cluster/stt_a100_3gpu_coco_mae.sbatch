@@ -32,11 +32,13 @@ conda activate py12
 CONFIG="${CONFIG:-configs/stt_b_coco_paper_mae_3xa100.json}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-3}"
 GPU_WATCH="/home/dsoselia/scratch.varshney-prj/SegmentThisThing/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}-gpu_watch.csv"
-ARTIFACT="/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt"
+MAE_RUN_ROOT="${MAE_RUN_ROOT:-/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_coco_paper_mae_3xa100}"
+ARTIFACT="${ARTIFACT:-/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_3xa100_final_encoder.pt}"
 
 echo "job_id=$SLURM_JOB_ID"
 echo "hostname=$(hostname)"
 echo "config=$CONFIG"
+echo "mae_run_root=$MAE_RUN_ROOT"
 echo "artifact=$ARTIFACT"
 
 (
@@ -50,5 +52,5 @@ trap 'kill $GPU_WATCH_PID 2>/dev/null || true' EXIT
 
 torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" scripts/run_stt.py pretrain-mae --config "$CONFIG"
 
-LATEST_RUN="$(find /home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_coco_paper_mae_3xa100 -maxdepth 1 -type d -name 'mae_*' | sort | tail -n 1)"
+LATEST_RUN="$(find "$MAE_RUN_ROOT" -maxdepth 1 -type d -name 'mae_*' | sort | tail -n 1)"
 cp "$LATEST_RUN/final_encoder.pt" "$ARTIFACT"

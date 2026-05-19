@@ -1,0 +1,78 @@
+{
+  "model": {
+    "size": "b",
+    "tokenizer_type": "stt_ring"
+  },
+  "runtime": {
+    "output_dir": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/runs/stt_b_coco_paper_seg_3xa100_run2",
+    "profile_name": "coco_paper_seg_3xa100_run2",
+    "seed": 1337,
+    "device": "cuda",
+    "amp_dtype": "bfloat16",
+    "allow_tf32": true,
+    "cudnn_benchmark": true,
+    "matmul_precision": "high",
+    "sharing_strategy": "file_system",
+    "multiprocessing_context": "fork",
+    "num_intraop_threads": 2,
+    "num_interop_threads": 1,
+    "distributed": true,
+    "backend": "nccl",
+    "micro_batch_size": 2,
+    "num_workers": 4,
+    "pin_memory": true,
+    "pin_memory_device": "cuda",
+    "persistent_workers": true,
+    "prefetch_factor": 4,
+    "dataloader_in_order": true,
+    "dataloader_timeout_s": 600,
+    "save_every": 500,
+    "log_every": 20,
+    "eval_every": 500,
+    "resume_from": null,
+    "checkpoint_keep_last": 4,
+    "save_optimizer_state": true,
+    "save_rng_state": true,
+    "run_status_filename": "RUN_STATUS.md",
+    "wandb_enabled": true,
+    "wandb_project": "segment-this-thing",
+    "wandb_mode": "offline",
+    "wandb_run_name": "coco_paper_seg_3xa100_run2",
+    "wandb_tags": ["stt", "segmentation", "coco", "paper", "3xa100", "offline", "run2"],
+    "num_steps": 20000
+  },
+  "segmentation": {
+    "enabled": true,
+    "train_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_train_instances.jsonl",
+    "pretrained_encoder": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/artifacts/stt_b_coco_paper_mae_3xa100_run2_final_encoder.pt",
+    "init_checkpoint": null,
+    "lr": 1.52587890625e-05,
+    "weight_decay": 0.001,
+    "warmup_steps": 1000,
+    "margin": 256,
+    "max_segments_per_image": 16,
+    "sample_multiple_segments_per_image": true,
+    "effective_batch_size": 2048,
+    "target_batch_schedule": {
+      "0": 2048
+    },
+    "focal_weight": 20.0,
+    "dice_weight": 1.0,
+    "iou_weight": 0.01,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "prompt_noise_std": 0.0
+  },
+  "evaluation": {
+    "named_eval_manifests": {
+      "coco2017_val": "/home/dsoselia/scratch.varshney-prj/SegmentThisThing/data/coco2017/manifests/coco2017_val_instances.jsonl"
+    },
+    "max_examples": 1000,
+    "threshold": 0.5,
+    "upsample_small_images": true
+  },
+  "assumptions": [
+    "Second COCO segmentation run on 3x A100 with the same shortened paper-shaped schedule as run 1.",
+    "Loads only the distinct run-2 encoder exported by the run-2 MAE job."
+  ]
+}

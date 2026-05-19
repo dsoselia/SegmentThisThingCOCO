@@ -66,6 +66,8 @@ class RuntimeConfig:
 class MAEConfig:
     enabled: bool = True
     train_manifest: Optional[str] = None
+    val_manifest: Optional[str] = None
+    val_max_batches: int = 32
     lr: float = 2 ** -13
     weight_decay: float = 1e-3
     warmup_steps: int = 10_000

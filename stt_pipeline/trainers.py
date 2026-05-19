@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -425,6 +426,70 @@ def _run_periodic_eval(
 
 
 @torch.no_grad()
+def _run_mae_validation(
+    *,
+    config: ExperimentConfig,
+    trainer: torch.nn.Module,
+    foveator,
+    device: torch.device,
+    amp_dtype: torch.dtype,
+    ctx: DistributedContext,
+) -> dict[str, float] | None:
+    if not config.mae.val_manifest:
+        return None
+
+    was_training = trainer.training
+    trainer.eval()
+    val_runtime = replace(config.runtime, persistent_workers=False)
+    val_loader, val_sampler = _build_loader(config.mae.val_manifest, val_runtime, config.mae.margin, 1, ctx, task="mae")
+    if val_sampler is not None:
+        val_sampler.set_epoch(0)
+
+    total_loss = torch.zeros((), device=device)
+    total_mask_fraction = torch.zeros((), device=device)
+    total_batches = torch.zeros((), device=device)
+    max_batches = max(1, int(config.mae.val_max_batches))
+
+    for batch_idx, samples in enumerate(val_loader):
+        if batch_idx >= max_batches:
+            break
+        token_batch = []
+        valid_batch = []
+        for sample in samples:
+            image = sample.image.to(device, non_blocking=config.runtime.pin_memory)
+            base_center = sample.center.to(device, non_blocking=config.runtime.pin_memory)
+            for _ in range(config.mae.views_per_image):
+                tokens, valid_mask, _ = build_model_inputs(image, base_center, foveator)
+                token_batch.append(tokens)
+                valid_batch.append(valid_mask)
+
+        tokens = torch.stack(token_batch).float()
+        valid_mask = torch.stack(valid_batch).to(device, non_blocking=True)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+            loss, metrics = trainer(tokens, valid_mask, config.mae.mask_ratio)
+        total_loss += loss.detach()
+        total_mask_fraction += float(metrics["mask_fraction"])
+        total_batches += 1
+
+    if ctx.enabled and dist.is_initialized():
+        dist.all_reduce(total_loss, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_mask_fraction, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_batches, op=dist.ReduceOp.SUM)
+
+    if was_training:
+        trainer.train()
+
+    count = int(total_batches.detach().cpu())
+    if count == 0 or not ctx.is_main_process:
+        return None
+    return {
+        "loss": float((total_loss / total_batches).detach().cpu()),
+        "mask_fraction": float((total_mask_fraction / total_batches).detach().cpu()),
+        "batches": float(count),
+    }
+
+
+@torch.no_grad()
 def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
     startup_started_at = time.time()
     configure_torch_runtime(config.runtime)
@@ -659,6 +724,30 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 distributed_barrier(ctx)
                 if checkpoint_path is not None:
                     _update_status(run_dir, config, phase="mae", state="checkpointed", step=step, ctx=ctx)
+
+            should_eval = config.runtime.eval_every is not None and step > 0 and step % config.runtime.eval_every == 0
+            if should_eval:
+                val_summary = _run_mae_validation(
+                    config=config,
+                    trainer=trainer,
+                    foveator=foveator,
+                    device=device,
+                    amp_dtype=amp_dtype,
+                    ctx=ctx,
+                )
+                if val_summary is not None:
+                    append_jsonl(run_dir / "metrics.jsonl", {"step": step, **{f"val_{k}": v for k, v in val_summary.items()}})
+                    wandb_log(wandb_run, {f"val/{k}": v for k, v in val_summary.items()}, step=step)
+                    _update_status(
+                        run_dir,
+                        config,
+                        phase="mae",
+                        state="validated",
+                        step=step,
+                        ctx=ctx,
+                        extra_lines=[f"- val_loss: `{val_summary.get('loss')}`"],
+                    )
+                distributed_barrier(ctx)
 
         if ctx.is_main_process:
             save_checkpoint(
