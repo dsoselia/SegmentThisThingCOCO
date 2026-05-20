@@ -5,6 +5,7 @@
 #SBATCH --job-name=stt-a100-3gpu-coco-mae
 #SBATCH -A varshney-prj-aac
 #SBATCH -p gpu
+#SBATCH --nodes=1
 #SBATCH --gpus=a100:3
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=92000
