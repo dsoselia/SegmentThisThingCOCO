@@ -49,6 +49,7 @@ class RuntimeConfig:
     eval_every: int | None = None
     resume_from: Optional[str] = None
     checkpoint_keep_last: int = 2
+    checkpoint_keep_every: int | None = None
     save_optimizer_state: bool = True
     save_rng_state: bool = True
     run_status_filename: str = "RUN_STATUS.md"

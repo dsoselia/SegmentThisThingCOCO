@@ -264,8 +264,16 @@ def _save_training_checkpoint(
 
     keep = max(0, int(config.runtime.checkpoint_keep_last))
     checkpoint_paths = sorted(checkpoint_dir.glob("checkpoint_step_*.pt"))
+    keep_every = config.runtime.checkpoint_keep_every
     if keep > 0 and len(checkpoint_paths) > keep:
         for old_path in checkpoint_paths[:-keep]:
+            if keep_every:
+                try:
+                    old_step = int(old_path.stem.rsplit("_", 1)[-1])
+                except ValueError:
+                    old_step = -1
+                if old_step > 0 and old_step % int(keep_every) == 0:
+                    continue
             old_path.unlink(missing_ok=True)
     return checkpoint_path
 
