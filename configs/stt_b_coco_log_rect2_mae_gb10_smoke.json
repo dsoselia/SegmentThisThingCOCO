@@ -38,7 +38,7 @@
     "save_rng_state": true,
     "run_status_filename": "RUN_STATUS.md",
     "wandb_enabled": true,
-    "wandb_project": "SegmentThisThingLogRect2GB10",
+    "wandb_project": "SegmentThisThingLearnableLogRectGB10",
     "wandb_mode": "offline",
     "wandb_tags": [
       "stt",
@@ -55,6 +55,11 @@
   "mae": {
     "enabled": true,
     "train_manifest": "/home/dsoselia/SegmentThisThingLogRect2GB10/data/coco2017/manifests/coco2017_mae_train_images.jsonl",
+    "val_manifest": "/home/dsoselia/SegmentThisThingLogRect2GB10/data/coco2017/manifests/coco2017_mae_val_images.jsonl",
+    "val_every": 10,
+    "val_max_examples": 8,
+    "val_views_per_image": 1,
+    "val_jitter_radius": 0,
     "lr": 0.0001220703125,
     "weight_decay": 0.001,
     "warmup_steps": 1000,

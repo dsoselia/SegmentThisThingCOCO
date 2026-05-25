@@ -73,6 +73,11 @@ class RuntimeConfig:
 class MAEConfig:
     enabled: bool = True
     train_manifest: Optional[str] = None
+    val_manifest: Optional[str] = None
+    val_every: int | None = None
+    val_max_examples: int = 128
+    val_views_per_image: int = 1
+    val_jitter_radius: int = 0
     lr: float = 2 ** -13
     weight_decay: float = 1e-3
     warmup_steps: int = 10_000

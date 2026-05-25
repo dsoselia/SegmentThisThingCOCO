@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -178,6 +179,48 @@ def _build_learnable_segmentation_tensors(
         torch.stack(target_batch).float(),
         preprocessing,
         len(flat_samples),
+    )
+
+
+def _build_mae_token_tensors(
+    samples: list[Sample],
+    *,
+    foveator,
+    device: torch.device,
+    pin_memory: bool,
+    views_per_image: int,
+    jitter_radius: int,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, float], int]:
+    token_batch = []
+    valid_batch = []
+    preprocessing = {
+        "host_to_device_time": 0.0,
+        "foveation_build_time": 0.0,
+        "valid_token_count": 0.0,
+    }
+    for sample in samples:
+        h2d_start = time.time()
+        image = sample.image.to(device, non_blocking=pin_memory)
+        base_center = sample.center.to(device, non_blocking=pin_memory)
+        preprocessing["host_to_device_time"] += time.time() - h2d_start
+        for _ in range(views_per_image):
+            if jitter_radius > 0:
+                jitter = torch.randint(-jitter_radius, jitter_radius + 1, (2,), device=device)
+                center = (base_center + jitter).clamp(min=0)
+            else:
+                center = base_center
+            foveation_start = time.time()
+            tokens, valid_mask, _ = build_model_inputs(image, center, foveator)
+            preprocessing["foveation_build_time"] += time.time() - foveation_start
+            preprocessing["valid_token_count"] += float(valid_mask.sum().detach().cpu())
+            token_batch.append(tokens)
+            valid_batch.append(valid_mask)
+
+    return (
+        torch.stack(token_batch).float(),
+        torch.stack(valid_batch).bool(),
+        preprocessing,
+        len(samples),
     )
 
 
@@ -489,6 +532,93 @@ def _run_periodic_eval(
 
 
 @torch.no_grad()
+def _run_mae_validation(
+    *,
+    config: ExperimentConfig,
+    trainer: torch.nn.Module,
+    foveator,
+    loader: DataLoader,
+    sampler: DistributedSampler | None,
+    iterator,
+    epoch: int,
+    device: torch.device,
+    amp_dtype: torch.dtype,
+    ctx: DistributedContext,
+    step: int,
+) -> tuple[dict[str, Any] | None, Any, int]:
+    was_training = trainer.training
+    foveator_was_training = getattr(foveator, "training", False)
+    trainer.eval()
+    if hasattr(foveator, "eval"):
+        foveator.eval()
+
+    local_loss_sum = 0.0
+    local_mask_fraction_sum = 0.0
+    local_examples = 0
+    local_token_views = 0
+    validation_start = time.time()
+    max_examples = max(1, int(config.mae.val_max_examples))
+    views_per_image = max(1, int(config.mae.val_views_per_image))
+    jitter_radius = max(0, int(config.mae.val_jitter_radius))
+    rng_devices = []
+    if device.type == "cuda":
+        rng_devices = [device.index if device.index is not None else torch.cuda.current_device()]
+
+    with torch.random.fork_rng(devices=rng_devices):
+        torch.manual_seed(config.runtime.seed + step * 1_000_003 + ctx.rank)
+        if device.type == "cuda":
+            torch.cuda.manual_seed(config.runtime.seed + step * 1_000_003 + ctx.rank)
+        while local_examples < max_examples:
+            samples, iterator, epoch, _ = _advance_iterator(loader, sampler, iterator, epoch)
+            tokens, valid_mask, _, example_count = _build_mae_token_tensors(
+                samples,
+                foveator=foveator,
+                device=device,
+                pin_memory=config.runtime.pin_memory,
+                views_per_image=views_per_image,
+                jitter_radius=jitter_radius,
+            )
+            token_views = int(tokens.shape[0])
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+                loss, metrics = trainer(tokens, valid_mask, config.mae.mask_ratio)
+            if torch.isfinite(loss):
+                local_loss_sum += float(loss.detach().cpu()) * token_views
+                local_mask_fraction_sum += float(metrics["mask_fraction"]) * token_views
+                local_token_views += token_views
+            local_examples += example_count
+
+    elapsed = time.time() - validation_start
+    totals = torch.tensor(
+        [local_loss_sum, local_mask_fraction_sum, float(local_examples), float(local_token_views), elapsed],
+        device=device,
+        dtype=torch.float64,
+    )
+    if ctx.enabled:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+
+    if was_training:
+        trainer.train()
+    if foveator_was_training and hasattr(foveator, "train"):
+        foveator.train()
+
+    if not ctx.is_main_process:
+        return None, iterator, epoch
+
+    token_views_total = max(float(totals[3].item()), 1.0)
+    summary = {
+        "step": step,
+        "loss": float(totals[0].item() / token_views_total),
+        "mask_fraction": float(totals[1].item() / token_views_total),
+        "examples": int(totals[2].item()),
+        "token_views": int(totals[3].item()),
+        "seconds": float(totals[4].item()),
+        "views_per_image": views_per_image,
+        "jitter_radius": jitter_radius,
+    }
+    return summary, iterator, epoch
+
+
+@torch.no_grad()
 def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
     startup_started_at = time.time()
     configure_torch_runtime(config.runtime)
@@ -578,7 +708,18 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             )
 
         loader, sampler = _build_loader(config.mae.train_manifest, config.runtime, config.mae.margin, 1, ctx, task="mae")
+        val_loader = None
+        val_sampler = None
+        val_iterator = None
+        val_epoch = 0
+        mae_val_enabled = bool(config.mae.val_manifest and config.mae.val_every and config.mae.val_every > 0)
+        if mae_val_enabled:
+            val_loader, val_sampler = _build_loader(config.mae.val_manifest, config.runtime, config.mae.margin, 1, ctx, task="mae")
+            val_iterator = _build_iterator(val_loader, val_sampler, val_epoch)
         if ctx.is_main_process:
+            loader_detail = f"dataset_len={len(loader.dataset)}"
+            if val_loader is not None:
+                loader_detail += f"; val_dataset_len={len(val_loader.dataset)}; val_every={config.mae.val_every}"
             _mark_startup_stage(
                 run_dir,
                 config,
@@ -586,7 +727,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 phase="mae",
                 step=0,
                 stage="loader_built",
-                detail=_startup_detail(startup_started_at, f"dataset_len={len(loader.dataset)}"),
+                detail=_startup_detail(startup_started_at, loader_detail),
             )
         foveator = build_foveator(config.model).to(device)
         segment_model = build_model(config.model.size, foveator)
@@ -649,27 +790,16 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     )
 
                 compute_start = time.time()
-                token_batch = []
-                valid_batch = []
-                host_to_device_time = 0.0
-                foveation_build_time = 0.0
-                for sample in samples:
-                    h2d_start = time.time()
-                    image = sample.image.to(device, non_blocking=config.runtime.pin_memory)
-                    base_center = sample.center.to(device, non_blocking=config.runtime.pin_memory)
-                    host_to_device_time += time.time() - h2d_start
-                    for _ in range(config.mae.views_per_image):
-                        jitter = torch.randint(-8, 9, (2,), device=device)
-                        center = (base_center + jitter).clamp(min=0)
-                        foveation_start = time.time()
-                        tokens, valid_mask, _ = build_model_inputs(image, center, foveator)
-                        foveation_build_time += time.time() - foveation_start
-                        token_batch.append(tokens)
-                        valid_batch.append(valid_mask)
-                host_to_device_total += host_to_device_time
-                foveation_build_total += foveation_build_time
-                tokens = torch.stack(token_batch).float()
-                valid_mask = torch.stack(valid_batch).to(device, non_blocking=True)
+                tokens, valid_mask, preprocessing, _ = _build_mae_token_tensors(
+                    samples,
+                    foveator=foveator,
+                    device=device,
+                    pin_memory=config.runtime.pin_memory,
+                    views_per_image=config.mae.views_per_image,
+                    jitter_radius=8,
+                )
+                host_to_device_total += preprocessing["host_to_device_time"]
+                foveation_build_total += preprocessing["foveation_build_time"]
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
                     loss, metrics = trainer(tokens, valid_mask, config.mae.mask_ratio)
                     loss = loss / accum_steps
@@ -721,6 +851,38 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     },
                 )
                 wandb_log(wandb_run, {f"train/{k}": v for k, v in summary.items() if k != "step"}, step=step)
+            if mae_val_enabled and val_loader is not None and val_iterator is not None and (
+                step % int(config.mae.val_every) == 0 or step == (config.runtime.num_steps - 1)
+            ):
+                val_summary, val_iterator, val_epoch = _run_mae_validation(
+                    config=config,
+                    trainer=trainer,
+                    foveator=foveator,
+                    loader=val_loader,
+                    sampler=val_sampler,
+                    iterator=val_iterator,
+                    epoch=val_epoch,
+                    device=device,
+                    amp_dtype=amp_dtype,
+                    ctx=ctx,
+                    step=step,
+                )
+                if val_summary is not None:
+                    append_jsonl(run_dir / "mae_val_metrics.jsonl", val_summary)
+                    wandb_log(wandb_run, {f"val/{k}": v for k, v in val_summary.items() if k != "step"}, step=step)
+                    _update_status(
+                        run_dir,
+                        config,
+                        phase="mae",
+                        state="validated",
+                        step=step,
+                        ctx=ctx,
+                        extra_lines=[
+                            f"- val_loss: `{val_summary['loss']:.6f}`",
+                            f"- val_examples: `{val_summary['examples']}`",
+                            f"- val_token_views: `{val_summary['token_views']}`",
+                        ],
+                    )
             if step % config.runtime.save_every == 0 or step == (config.runtime.num_steps - 1):
                 checkpoint_path = _save_training_checkpoint(
                     run_dir,
