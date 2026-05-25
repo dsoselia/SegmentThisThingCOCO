@@ -25,7 +25,7 @@
     "dataloader_timeout_s": 600,
     "save_every": 2,
     "log_every": 1,
-    "eval_every": null,
+    "eval_every": 2,
     "resume_from": null,
     "checkpoint_keep_last": 2,
     "save_optimizer_state": true,
@@ -34,7 +34,14 @@
     "wandb_enabled": true,
     "wandb_project": "SAMZaratan",
     "wandb_mode": "offline",
-    "wandb_tags": ["sam", "mae", "coco", "quick", "2xa100", "offline"],
+    "wandb_tags": [
+      "sam",
+      "mae",
+      "coco",
+      "quick",
+      "2xa100",
+      "offline"
+    ],
     "num_steps": 4
   },
   "mae": {
@@ -47,6 +54,8 @@
     "effective_batch_size": 4,
     "target_batch_schedule": {
       "0": 4
-    }
+    },
+    "val_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_mae_val_images.jsonl",
+    "val_max_examples": 32
   }
 }

@@ -244,13 +244,16 @@ def _furthest_point_with_fallback(mask: torch.Tensor) -> torch.Tensor:
 
 
 class MAETrainingManifestDataset(torch.utils.data.Dataset):
-    def __init__(self, manifest_path: str | Path, image_size: int):
+    def __init__(self, manifest_path: str | Path, image_size: int, max_examples: Optional[int] = None):
         self.manifest = IndexedJsonl(manifest_path)
         self.manifest_path = str(manifest_path)
         self.image_size = image_size
+        self.max_examples = max_examples
 
     def __len__(self) -> int:
-        return len(self.manifest)
+        if self.max_examples is None:
+            return len(self.manifest)
+        return min(int(self.max_examples), len(self.manifest))
 
     def __getitem__(self, index: int) -> MAESample:
         entry = self.manifest[index]

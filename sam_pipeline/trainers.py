@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -43,6 +44,7 @@ from .runtime import (
     unwrap_model,
     update_run_status,
     wandb_log,
+    write_json,
 )
 
 
@@ -86,6 +88,32 @@ def _build_loader(dataset, runtime, ctx: DistributedContext, collate_fn):
     if _loader_supports("in_order"):
         kwargs["in_order"] = runtime.dataloader_in_order
     return DataLoader(**kwargs), sampler
+
+
+def _build_eval_loader(dataset, runtime, ctx: DistributedContext, collate_fn):
+    if ctx.enabled:
+        dataset = torch.utils.data.Subset(dataset, range(ctx.rank, len(dataset), ctx.world_size))
+    kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": runtime.micro_batch_size,
+        "shuffle": False,
+        "num_workers": runtime.num_workers,
+        "collate_fn": collate_fn,
+        "drop_last": False,
+        "pin_memory": runtime.pin_memory,
+        "persistent_workers": runtime.persistent_workers and runtime.num_workers > 0,
+        "worker_init_fn": seed_worker,
+        "timeout": runtime.dataloader_timeout_s,
+    }
+    if runtime.pin_memory and runtime.pin_memory_device and _loader_supports("pin_memory_device"):
+        kwargs["pin_memory_device"] = runtime.pin_memory_device
+    if runtime.num_workers > 0:
+        kwargs["prefetch_factor"] = runtime.prefetch_factor
+        if runtime.multiprocessing_context:
+            kwargs["multiprocessing_context"] = runtime.multiprocessing_context
+    if _loader_supports("in_order"):
+        kwargs["in_order"] = runtime.dataloader_in_order
+    return DataLoader(**kwargs)
 
 
 def _make_run_dir(config: ExperimentConfig, prefix: str) -> Path:
@@ -217,6 +245,42 @@ def _flatten_eval_summary_for_wandb(summary: dict[str, Any]) -> dict[str, float]
     return payload
 
 
+@torch.no_grad()
+def _evaluate_mae_loss(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    *,
+    mask_ratio: float,
+    amp_dtype: torch.dtype,
+    device: torch.device,
+    ctx: DistributedContext,
+) -> dict[str, float]:
+    was_training = model.training
+    model.eval()
+    local_loss_sum = 0.0
+    local_masked_fraction_sum = 0.0
+    local_count = 0
+    for batch in loader:
+        images = batch.image.to(device, non_blocking=True)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+            loss, metrics = model(images, mask_ratio)
+        batch_count = int(images.shape[0])
+        local_loss_sum += float(loss.detach().cpu()) * batch_count
+        local_masked_fraction_sum += float(metrics["masked_fraction"]) * batch_count
+        local_count += batch_count
+    totals = torch.tensor([local_loss_sum, local_masked_fraction_sum, float(local_count)], dtype=torch.float64, device=device)
+    if ctx.enabled:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+    if was_training:
+        model.train()
+    count = max(float(totals[2].item()), 1.0)
+    return {
+        "val/loss": float(totals[0].item() / count),
+        "val/masked_fraction": float(totals[1].item() / count),
+        "val/num_examples": float(totals[2].item()),
+    }
+
+
 def _load_resume_state(config: ExperimentConfig, model: torch.nn.Module, optimizer, scaler, ctx: DistributedContext) -> int:
     if not config.runtime.resume_from:
         return 0
@@ -267,6 +331,14 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             _startup_status(run_dir, config, phase="mae", ctx=ctx, device=device, detail="metadata_saved")
         dataset = MAETrainingManifestDataset(config.mae.train_manifest, config.model.image_size)
         loader, sampler = _build_loader(dataset, config.runtime, ctx, collate_mae_samples)
+        val_loader = None
+        if config.mae.val_manifest:
+            val_dataset = MAETrainingManifestDataset(
+                config.mae.val_manifest,
+                config.model.image_size,
+                max_examples=config.mae.val_max_examples,
+            )
+            val_loader = _build_eval_loader(val_dataset, config.runtime, ctx, collate_mae_samples)
         sam_model = build_sam_model(config.model.size, image_size=config.model.image_size, patch_size=config.model.patch_size).to(device)
         model = SamBackboneMAE(sam_model).to(device)
         model = _maybe_wrap_ddp(model, device, ctx)
@@ -312,6 +384,30 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     batch_metrics=batch_metrics,
                 )
                 wandb_log(wandb_run, {f"train/{k}": v for k, v in summary.items() if k != "step"}, step=step)
+            if val_loader is not None and config.runtime.eval_every is not None and (
+                step % config.runtime.eval_every == 0 or step == config.runtime.num_steps - 1
+            ):
+                val_start = time.time()
+                val_summary = _evaluate_mae_loss(
+                    model,
+                    val_loader,
+                    mask_ratio=config.mae.mask_ratio,
+                    amp_dtype=amp_dtype,
+                    device=device,
+                    ctx=ctx,
+                )
+                val_summary.update(
+                    {
+                        "step": float(step),
+                        "val/seconds": float(time.time() - val_start),
+                        "val/mask_ratio": float(config.mae.mask_ratio),
+                    }
+                )
+                if ctx.is_main_process:
+                    write_json(run_dir / "eval" / f"mae_val_step_{step:07d}.json", val_summary)
+                    append_jsonl(run_dir / "metrics.jsonl", val_summary)
+                    wandb_log(wandb_run, {k: v for k, v in val_summary.items() if k != "step"}, step=step)
+                distributed_barrier(ctx)
             if step % config.runtime.save_every == 0 or step == config.runtime.num_steps - 1:
                 _save_periodic_checkpoint(run_dir, config, model, optimizer, scaler, step=step, ctx=ctx, extra={"phase": "mae"})
 

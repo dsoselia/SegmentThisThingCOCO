@@ -28,7 +28,7 @@
     "dataloader_timeout_s": 600,
     "save_every": 250,
     "log_every": 20,
-    "eval_every": null,
+    "eval_every": 500,
     "resume_from": null,
     "checkpoint_keep_last": 4,
     "save_optimizer_state": true,
@@ -37,7 +37,15 @@
     "wandb_enabled": true,
     "wandb_project": "SAMZaratan_low_res",
     "wandb_mode": "offline",
-    "wandb_tags": ["sam", "mae", "coco", "low_res", "stage", "3xa100", "offline"],
+    "wandb_tags": [
+      "sam",
+      "mae",
+      "coco",
+      "low_res",
+      "stage",
+      "3xa100",
+      "offline"
+    ],
     "num_steps": 1000
   },
   "mae": {
@@ -50,7 +58,9 @@
     "effective_batch_size": 1024,
     "target_batch_schedule": {
       "0": 1024
-    }
+    },
+    "val_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_mae_val_images.jsonl",
+    "val_max_examples": 1000
   },
   "assumptions": [
     "Low-resolution SAM MAE stage run at 208x208.",

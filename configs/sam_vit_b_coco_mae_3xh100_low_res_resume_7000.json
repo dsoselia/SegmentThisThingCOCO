@@ -28,7 +28,7 @@
     "dataloader_timeout_s": 600,
     "save_every": 500,
     "log_every": 20,
-    "eval_every": null,
+    "eval_every": 500,
     "resume_from": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/runs/sam_vit_b_coco_mae_2xh100_low_res/mae_20260421T004201Z/checkpoints/checkpoint_step_0007000.pt",
     "checkpoint_keep_last": 4,
     "save_optimizer_state": true,
@@ -37,7 +37,15 @@
     "wandb_enabled": true,
     "wandb_project": "SAMZaratan_low_res",
     "wandb_mode": "offline",
-    "wandb_tags": ["sam", "mae", "coco", "low_res", "3xh100", "resume", "offline"],
+    "wandb_tags": [
+      "sam",
+      "mae",
+      "coco",
+      "low_res",
+      "3xh100",
+      "resume",
+      "offline"
+    ],
     "num_steps": 10000
   },
   "mae": {
@@ -50,7 +58,9 @@
     "effective_batch_size": 1024,
     "target_batch_schedule": {
       "0": 1024
-    }
+    },
+    "val_manifest": "/home/dsoselia/scratch.varshney-prj/SegmentAnything/data/coco2017/manifests/coco2017_mae_val_images.jsonl",
+    "val_max_examples": 1000
   },
   "assumptions": [
     "Resume low-resolution SAM MAE from checkpoint step 7000 on 3xH100.",
