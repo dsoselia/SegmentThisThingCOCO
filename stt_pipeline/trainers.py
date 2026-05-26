@@ -240,7 +240,7 @@ def _mean_metrics(metrics_list: list[dict[str, float]]) -> dict[str, float]:
 
 
 def _make_run_dir(config: ExperimentConfig, prefix: str) -> Path:
-    if config.runtime.resume_from:
+    if config.runtime.resume_from and not config.runtime.resume_into_new_run:
         run_dir = infer_run_dir_from_checkpoint(config.runtime.resume_from)
         (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
         (run_dir / "eval").mkdir(parents=True, exist_ok=True)
@@ -390,16 +390,19 @@ def _load_resume_state(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     ctx: DistributedContext,
+    *,
+    strict: bool = True,
+    restore_optimizer_state: bool = True,
 ) -> int:
     if not config.runtime.resume_from:
         return 0
     state = load_checkpoint(
         model,
         config.runtime.resume_from,
-        optimizer=optimizer,
-        scaler=scaler,
-        strict=True,
-        restore_training_state=True,
+        optimizer=optimizer if restore_optimizer_state else None,
+        scaler=scaler if restore_optimizer_state else None,
+        strict=strict,
+        restore_training_state=restore_optimizer_state,
     )
     set_rng_state(state.get("rng_state"))
     start_step = int(state.get("step", -1)) + 1
@@ -730,19 +733,48 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 detail=_startup_detail(startup_started_at, loader_detail),
             )
         foveator = build_foveator(config.model).to(device)
+        if config.model.log_rect_learnable and not config.mae.learn_log_rect_exponent:
+            raw_exponent = getattr(foveator, "raw_exponent", None)
+            if isinstance(raw_exponent, torch.nn.Parameter):
+                raw_exponent.requires_grad_(False)
         segment_model = build_model(config.model.size, foveator)
         trainer = FoveatedMAE(
             image_encoder=segment_model.image_encoder,
             feature_dim=segment_model.mask_decoder.pos_enc.shape[-1],
             token_size=config.model.token_size,
         ).to(device)
+        if config.model.log_rect_learnable:
+            trainer.foveator = foveator
         trainer = _maybe_wrap_ddp(trainer, device, ctx)
-        optimizer = torch.optim.AdamW(trainer.parameters(), lr=config.mae.lr, weight_decay=config.mae.weight_decay)
+        if config.model.log_rect_learnable:
+            warp_param_ids = {id(param) for param in foveator.parameters() if param.requires_grad}
+            mae_params = [
+                param
+                for param in trainer.parameters()
+                if param.requires_grad and id(param) not in warp_param_ids
+            ]
+            warp_params = [param for param in foveator.parameters() if param.requires_grad]
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": mae_params, "lr": config.mae.lr, "weight_decay": config.mae.weight_decay},
+                    {"params": warp_params, "lr": config.mae.log_rect_warp_lr, "weight_decay": 0.0},
+                ]
+            )
+        else:
+            optimizer = torch.optim.AdamW(trainer.parameters(), lr=config.mae.lr, weight_decay=config.mae.weight_decay)
         scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and amp_dtype == torch.float16)
         epoch = 0
         iterator = _build_iterator(loader, sampler, epoch)
         world_batch = config.runtime.micro_batch_size * ctx.world_size * config.mae.views_per_image
-        start_step = _load_resume_state(config, trainer, optimizer, scaler, ctx)
+        start_step = _load_resume_state(
+            config,
+            trainer,
+            optimizer,
+            scaler,
+            ctx,
+            strict=config.mae.strict_resume,
+            restore_optimizer_state=config.mae.restore_optimizer_state,
+        )
         if ctx.is_main_process:
             _update_status(run_dir, config, phase="mae", state="running", step=start_step, ctx=ctx)
 

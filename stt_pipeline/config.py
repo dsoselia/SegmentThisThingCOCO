@@ -55,6 +55,7 @@ class RuntimeConfig:
     log_every: int = 50
     eval_every: int | None = None
     resume_from: Optional[str] = None
+    resume_into_new_run: bool = False
     checkpoint_keep_last: int = 2
     save_optimizer_state: bool = True
     save_rng_state: bool = True
@@ -79,6 +80,10 @@ class MAEConfig:
     val_views_per_image: int = 1
     val_jitter_radius: int = 0
     lr: float = 2 ** -13
+    log_rect_warp_lr: float = 1e-6
+    learn_log_rect_exponent: bool = True
+    restore_optimizer_state: bool = True
+    strict_resume: bool = True
     weight_decay: float = 1e-3
     warmup_steps: int = 10_000
     mask_ratio: float = 0.75
