@@ -20,7 +20,7 @@ from .data import MAETrainingManifestDataset, Sample, SegmentationBatch, Segment
 from .evaluate import evaluate_checkpoint
 from .losses import multimask_segmentation_loss
 from .mae import FoveatedMAE
-from .modeling import attach_foveator_if_learnable, build_foveator, build_model, load_checkpoint, save_checkpoint
+from .modeling import attach_foveator_if_learnable, build_foveator, build_model, load_checkpoint, load_foveator_checkpoint, save_checkpoint
 from .runtime import (
     DistributedContext,
     append_jsonl,
@@ -638,6 +638,8 @@ def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
         prompt_noise_std=config.segmentation.prompt_noise_std,
     )
     foveator = build_foveator(config.model).to(device)
+    if config.segmentation.pretrained_foveator_checkpoint:
+        load_foveator_checkpoint(foveator, config.segmentation.pretrained_foveator_checkpoint)
     model = build_model(config.model.size, foveator).to(device).eval()
     model = attach_foveator_if_learnable(model, foveator)
     if config.segmentation.init_checkpoint:
@@ -1003,6 +1005,8 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                 detail=_startup_detail(startup_started_at, f"dataset_len={len(loader.dataset)}"),
             )
         foveator = build_foveator(config.model).to(device)
+        if config.segmentation.pretrained_foveator_checkpoint and not config.runtime.resume_from:
+            load_foveator_checkpoint(foveator, config.segmentation.pretrained_foveator_checkpoint)
         model = build_model(config.model.size, foveator).to(device)
         model = attach_foveator_if_learnable(model, foveator)
         if config.segmentation.init_checkpoint and not config.runtime.resume_from:

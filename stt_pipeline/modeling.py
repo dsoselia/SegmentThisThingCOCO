@@ -86,6 +86,26 @@ def load_checkpoint(
     return {"model": state, "step": 0, "extra": {}}
 
 
+def load_foveator_checkpoint(
+    foveator: torch.nn.Module,
+    checkpoint_path: str | Path,
+    *,
+    strict: bool = True,
+) -> dict[str, Any]:
+    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    model_state = state["model"] if isinstance(state, dict) and "model" in state else state
+    prefix = "foveator."
+    foveator_state = {
+        key[len(prefix) :]: value
+        for key, value in model_state.items()
+        if key.startswith(prefix)
+    }
+    if not foveator_state:
+        raise ValueError(f"No {prefix} parameters found in checkpoint: {checkpoint_path}")
+    foveator.load_state_dict(foveator_state, strict=strict)
+    return state if isinstance(state, dict) else {"model": state, "step": 0, "extra": {}}
+
+
 def save_checkpoint(
     path: str | Path,
     model: torch.nn.Module,
