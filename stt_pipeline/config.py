@@ -18,6 +18,9 @@ class ModelConfig:
     log_rect_exponent: float = 4.0
     log_rect_center_width: int | None = None
     log_rect_lambda_scale: float = 1.0
+    log_rect_lambda_learnable: bool = False
+    log_rect_lambda_unfreeze_step: int = 0
+    log_rect_lambda_lr: float = 1e-3
     num_masks: int = 3
 
 
@@ -47,9 +50,11 @@ class RuntimeConfig:
     dataloader_in_order: bool = True
     dataloader_timeout_s: int = 0
     save_every: int = 1000
+    milestone_steps: list[int] = field(default_factory=list)
     log_every: int = 50
     eval_every: int | None = None
     resume_from: Optional[str] = None
+    fork_from: Optional[str] = None
     checkpoint_keep_last: int = 2
     save_optimizer_state: bool = True
     save_rng_state: bool = True
@@ -150,7 +155,7 @@ def _construct_dataclass(cls, payload: Dict[str, Any]):
 
 def load_config(path: str | Path) -> ExperimentConfig:
     raw = json.loads(Path(path).read_text())
-    return ExperimentConfig(
+    config = ExperimentConfig(
         model=_construct_dataclass(ModelConfig, raw.get("model", {})),
         runtime=_construct_dataclass(RuntimeConfig, raw.get("runtime", {})),
         mae=_construct_dataclass(MAEConfig, raw.get("mae", {})),
@@ -159,3 +164,6 @@ def load_config(path: str | Path) -> ExperimentConfig:
         benchmark=_construct_dataclass(BenchmarkConfig, raw.get("benchmark", {})),
         assumptions=raw.get("assumptions", []),
     )
+    if config.runtime.resume_from and config.runtime.fork_from:
+        raise ValueError("runtime.resume_from and runtime.fork_from are mutually exclusive")
+    return config

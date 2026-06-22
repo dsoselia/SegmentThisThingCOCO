@@ -4,6 +4,7 @@ from dataclasses import replace
 import inspect
 import math
 import os
+import signal
 import socket
 import time
 from pathlib import Path
@@ -45,6 +46,14 @@ from .runtime import (
     wandb_log,
 )
 from .transforms import build_model_inputs, project_mask_to_foveation
+
+
+_STOP_REQUESTED = False
+
+
+def _request_graceful_stop(signum, _frame) -> None:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
 
 
 def _scheduled_batch_size(step: int, schedule: dict[str, int], default: int) -> int:
@@ -166,6 +175,8 @@ def _update_status(
     ]
     if config.runtime.resume_from:
         lines.append(f"- resume_from: `{config.runtime.resume_from}`")
+    if config.runtime.fork_from:
+        lines.append(f"- fork_from: `{config.runtime.fork_from}`")
     if extra_lines:
         lines.extend(["", *extra_lines])
     update_run_status(run_dir, config.runtime.run_status_filename, lines)
@@ -269,6 +280,77 @@ def _save_training_checkpoint(
     return checkpoint_path
 
 
+def _save_milestone_checkpoint(
+    run_dir: Path,
+    config: ExperimentConfig,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    *,
+    step: int,
+    completed_steps: int,
+    ctx: DistributedContext,
+) -> Path | None:
+    """Save an immutable branch checkpoint named by completed updates."""
+    if not ctx.is_main_process:
+        return None
+    checkpoint_path = run_dir / "checkpoints" / f"checkpoint_milestone_{completed_steps:07d}.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer=optimizer,
+        scaler=scaler,
+        step=step,
+        config=config,
+        extra={"phase": "mae", "completed_steps": completed_steps, "milestone": True},
+        save_optimizer_state=config.runtime.save_optimizer_state,
+        save_rng_state=config.runtime.save_rng_state,
+    )
+    (run_dir / "last_checkpoint.txt").write_text(str(checkpoint_path) + "\n")
+    return checkpoint_path
+
+
+def _build_mae_optimizer(config: ExperimentConfig, trainer: torch.nn.Module) -> torch.optim.Optimizer:
+    model = unwrap_model(trainer)
+    lambda_parameter = getattr(getattr(model, "foveator", None), "raw_lambda_scale", None)
+    if lambda_parameter is None:
+        return torch.optim.AdamW(model.parameters(), lr=config.mae.lr, weight_decay=config.mae.weight_decay)
+    base_parameters = [parameter for parameter in model.parameters() if parameter is not lambda_parameter]
+    return torch.optim.AdamW(
+        [
+            {"params": base_parameters, "lr": config.mae.lr, "weight_decay": config.mae.weight_decay},
+            {"params": [lambda_parameter], "lr": config.model.log_rect_lambda_lr, "weight_decay": 0.0},
+        ]
+    )
+
+
+def _set_lambda_trainability(config: ExperimentConfig, trainer: torch.nn.Module, step: int) -> bool:
+    foveator = getattr(unwrap_model(trainer), "foveator", None)
+    if foveator is None or not hasattr(foveator, "set_lambda_learnable"):
+        return False
+    enabled = bool(
+        config.model.log_rect_lambda_learnable
+        and step >= config.model.log_rect_lambda_unfreeze_step
+    )
+    foveator.set_lambda_learnable(enabled)
+    return enabled
+
+
+def _lambda_metrics(trainer: torch.nn.Module) -> dict[str, float]:
+    foveator = getattr(unwrap_model(trainer), "foveator", None)
+    if foveator is None or not hasattr(foveator, "raw_lambda_scale"):
+        return {}
+    parameter = foveator.raw_lambda_scale
+    lower, upper, _ = foveator.get_bin_coordinates()
+    widths = upper - lower
+    return {
+        "lambda_scale": float(foveator.lambda_scale.detach().cpu()),
+        "lambda_grad_abs": 0.0 if parameter.grad is None else float(parameter.grad.detach().abs().cpu()),
+        "lambda_learnable": float(parameter.requires_grad),
+        "lambda_min_bin_width": float(widths.detach().amin().cpu()),
+    }
+
+
 def _maybe_wrap_ddp(model: torch.nn.Module, device: torch.device, ctx: DistributedContext) -> torch.nn.Module:
     if not ctx.enabled:
         return model
@@ -286,11 +368,12 @@ def _load_resume_state(
     scaler: torch.amp.GradScaler,
     ctx: DistributedContext,
 ) -> int:
-    if not config.runtime.resume_from:
+    checkpoint_path = config.runtime.resume_from or config.runtime.fork_from
+    if not checkpoint_path:
         return 0
     state = load_checkpoint(
         model,
-        config.runtime.resume_from,
+        checkpoint_path,
         optimizer=optimizer,
         scaler=scaler,
         strict=True,
@@ -573,6 +656,10 @@ def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
 
 
 def run_mae_pretraining(config: ExperimentConfig) -> Path:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = False
+    if hasattr(signal, "SIGUSR1"):
+        signal.signal(signal.SIGUSR1, _request_graceful_stop)
     ctx = init_distributed(config.runtime)
     wandb_run = None
     try:
@@ -620,9 +707,10 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             image_encoder=segment_model.image_encoder,
             feature_dim=segment_model.mask_decoder.pos_enc.shape[-1],
             token_size=config.model.token_size,
+            foveator=foveator,
         ).to(device)
         trainer = _maybe_wrap_ddp(trainer, device, ctx)
-        optimizer = torch.optim.AdamW(trainer.parameters(), lr=config.mae.lr, weight_decay=config.mae.weight_decay)
+        optimizer = _build_mae_optimizer(config, trainer)
         scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and amp_dtype == torch.float16)
         epoch = 0
         iterator = _build_iterator(loader, sampler, epoch)
@@ -633,6 +721,8 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             _update_status(run_dir, config, phase="mae", state="running", step=start_step, ctx=ctx)
 
         for step in range(start_step, config.runtime.num_steps):
+            lambda_is_learnable = _set_lambda_trainability(config, trainer, step)
+            active_foveator = unwrap_model(trainer).foveator
             target_batch = _scheduled_batch_size(step, config.mae.target_batch_schedule, config.mae.effective_batch_size)
             accum_steps = max(1, math.ceil(target_batch / world_batch))
             optimizer.zero_grad(set_to_none=True)
@@ -689,7 +779,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                         jitter = torch.randint(-8, 9, (2,), device=device)
                         center = (base_center + jitter).clamp(min=0)
                         foveation_start = time.time()
-                        tokens, valid_mask, _ = build_model_inputs(image, center, foveator)
+                        tokens, valid_mask, _ = build_model_inputs(image, center, active_foveator)
                         foveation_build_time += time.time() - foveation_start
                         token_batch.append(tokens)
                         valid_batch.append(valid_mask)
@@ -734,7 +824,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     batch_metrics=running,
                     data_time=data_time,
                     compute_time=compute_time,
-                    foveator=foveator,
+                    foveator=active_foveator,
                     device=device,
                     extra_metrics={
                         "batch_fetch_time": batch_fetch_total,
@@ -745,10 +835,16 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                         "target_projection_time": 0.0,
                         "host_to_device_time": host_to_device_total,
                         "stack_batch_time": 0.0,
+                        **_lambda_metrics(trainer),
                     },
                 )
-                wandb_log(wandb_run, {f"train/{k}": v for k, v in summary.items() if k != "step"}, step=step)
-            if step % config.runtime.save_every == 0 or step == (config.runtime.num_steps - 1):
+                wandb_payload = {f"train/{k}": v for k, v in summary.items() if k != "step"}
+                for key in ("lambda_scale", "lambda_grad_abs", "lambda_learnable", "lambda_min_bin_width"):
+                    if key in summary:
+                        wandb_payload[f"foveation/{key}"] = summary[key]
+                wandb_log(wandb_run, wandb_payload, step=step)
+            completed_steps = step + 1
+            if completed_steps % config.runtime.save_every == 0 or step == (config.runtime.num_steps - 1):
                 checkpoint_path = _save_training_checkpoint(
                     run_dir,
                     config,
@@ -763,11 +859,38 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 if checkpoint_path is not None:
                     _update_status(run_dir, config, phase="mae", state="checkpointed", step=step, ctx=ctx)
 
-            if config.mae.val_every and step > 0 and step % config.mae.val_every == 0:
+            if completed_steps in set(config.runtime.milestone_steps):
+                milestone_path = _save_milestone_checkpoint(
+                    run_dir,
+                    config,
+                    trainer,
+                    optimizer,
+                    scaler,
+                    step=step,
+                    completed_steps=completed_steps,
+                    ctx=ctx,
+                )
+                distributed_barrier(ctx)
+                if milestone_path is not None:
+                    _update_status(
+                        run_dir,
+                        config,
+                        phase="mae",
+                        state="milestone_checkpointed",
+                        step=step,
+                        ctx=ctx,
+                        extra_lines=[
+                            f"- completed_steps: `{completed_steps}`",
+                            f"- milestone_checkpoint: `{milestone_path}`",
+                            f"- lambda_learnable: `{lambda_is_learnable}`",
+                        ],
+                    )
+
+            if config.mae.val_every and completed_steps % config.mae.val_every == 0:
                 val_summary = _run_mae_validation(
                     config=config,
                     trainer=trainer,
-                    foveator=foveator,
+                    foveator=active_foveator,
                     device=device,
                     amp_dtype=amp_dtype,
                     val_loader=val_loader,
@@ -786,6 +909,32 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                         extra_lines=[f"- val_loss: `{val_summary['loss']:.6f}`"],
                     )
                 distributed_barrier(ctx)
+
+            if _STOP_REQUESTED:
+                interruption_path = _save_training_checkpoint(
+                    run_dir,
+                    config,
+                    trainer,
+                    optimizer,
+                    scaler,
+                    step=step,
+                    ctx=ctx,
+                    extra={"phase": "mae", "completed_steps": completed_steps, "interrupted": True},
+                )
+                distributed_barrier(ctx)
+                _update_status(
+                    run_dir,
+                    config,
+                    phase="mae",
+                    state="interrupted",
+                    step=step,
+                    ctx=ctx,
+                    extra_lines=[
+                        f"- completed_steps: `{completed_steps}`",
+                        f"- interruption_checkpoint: `{interruption_path}`",
+                    ],
+                )
+                return run_dir
 
         if ctx.is_main_process:
             save_checkpoint(

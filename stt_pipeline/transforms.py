@@ -39,15 +39,18 @@ def extract_scalar_foveation(foveator, scalar_image: torch.Tensor) -> torch.Tens
         raise ValueError(f"Expected scalar image with shape (H, W), got {tuple(scalar_image.shape)}")
     device = scalar_image.device
     integral = _compute_integral_map(scalar_image)
-    if hasattr(foveator, "bin_lower_pixel_coords") and hasattr(foveator, "bin_upper_pixel_coords"):
-        lower = foveator.bin_lower_pixel_coords.to(device)
-        upper = foveator.bin_upper_pixel_coords.to(device)
-        area = foveator.bin_area.to(device).float()
+    if hasattr(foveator, "get_bin_coordinates"):
+        lower, upper, area = foveator.get_bin_coordinates()
+        lower = lower.to(device)
+        upper = upper.to(device)
+        area = area.to(device).float()
+        top_right = torch.stack([upper[..., 0], lower[..., 1]], dim=-1)
+        bottom_left = torch.stack([lower[..., 0], upper[..., 1]], dim=-1)
         summed = (
-            integral[upper[..., 1], upper[..., 0]]
-            - integral[upper[..., 1], lower[..., 0]]
-            - integral[lower[..., 1], upper[..., 0]]
-            + integral[lower[..., 1], lower[..., 0]]
+            foveator._sample_integral(integral.unsqueeze(0), upper).squeeze(0)
+            - foveator._sample_integral(integral.unsqueeze(0), top_right).squeeze(0)
+            - foveator._sample_integral(integral.unsqueeze(0), bottom_left).squeeze(0)
+            + foveator._sample_integral(integral.unsqueeze(0), lower).squeeze(0)
         )
         return (summed / area).unsqueeze(1)
     grid = torch.stack(

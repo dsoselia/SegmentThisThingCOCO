@@ -88,8 +88,9 @@ class PowerSampler:
 def build_linear_lookup_map(foveator) -> torch.Tensor:
     pattern = foveator.get_pattern_bounds_size()
     linear = torch.empty((pattern, pattern), dtype=torch.long)
-    lower = foveator.bin_lower_pixel_coords.cpu()
-    upper = foveator.bin_upper_pixel_coords.cpu()
+    lower, upper, _ = foveator.get_bin_coordinates()
+    lower = lower.detach().round().long().cpu()
+    upper = upper.detach().round().long().cpu()
     token_size = foveator.token_size
     token_area = token_size * token_size
     for token in range(lower.shape[0]):

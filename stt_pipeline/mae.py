@@ -4,9 +4,10 @@ import torch
 
 
 class FoveatedMAE(torch.nn.Module):
-    def __init__(self, image_encoder: torch.nn.Module, feature_dim: int, token_size: int):
+    def __init__(self, image_encoder: torch.nn.Module, feature_dim: int, token_size: int, foveator: torch.nn.Module):
         super().__init__()
         self.image_encoder = image_encoder
+        self.foveator = foveator
         self.mask_token = torch.nn.Parameter(torch.zeros(3, token_size, token_size))
         self.decoder = torch.nn.Sequential(
             torch.nn.Linear(feature_dim, feature_dim),
@@ -27,7 +28,11 @@ class FoveatedMAE(torch.nn.Module):
         image_features, _ = self.image_encoder(masked_tokens, valid_token_mask)
         recon = self.decoder(image_features).view(batch, num_tokens, 3, self.token_size, self.token_size)
 
-        target = tokens.float() / 255.0
+        # The resampling layout is allowed to learn through the visible input
+        # tokens, but the reconstruction target must remain a stop-gradient
+        # target. Otherwise lambda can reduce loss by moving both prediction
+        # inputs and target values together.
+        target = tokens.detach().float() / 255.0
         loss_map = (recon - target).pow(2).mean(dim=(2, 3, 4))
         loss = loss_map[token_mask].mean()
         return loss, {

@@ -156,6 +156,7 @@ def main() -> None:
         image_encoder=model.image_encoder,
         feature_dim=_feature_dim_for_model_size(config.model.size),
         token_size=config.model.token_size,
+        foveator=foveator,
     ).to(device)
     load_checkpoint(trainer, args.checkpoint, strict=True)
     trainer.eval()
