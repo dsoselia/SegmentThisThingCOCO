@@ -416,18 +416,22 @@ class LogRectilinearFoveator(torch.nn.Module):
         axis_bins: int,
         exponent: float = 4.0,
         center_width: int | None = None,
+        lambda_scale: float = 1.0,
     ) -> None:
         super().__init__()
         if axis_bins < 3 or axis_bins % 2 == 0:
             raise ValueError("[LogRectilinearFoveator]: axis_bins must be an odd integer >= 3.")
         if pattern_size <= 0 or pattern_size % 2 != 0:
             raise ValueError("[LogRectilinearFoveator]: pattern_size must be a positive even integer.")
+        if lambda_scale <= 0:
+            raise ValueError("[LogRectilinearFoveator]: lambda_scale must be positive.")
 
         self.token_size = token_size
         self.pattern_size = pattern_size
         self.axis_bins = axis_bins
         self.exponent = exponent
         self.center_width = center_width or token_size
+        self.lambda_scale = lambda_scale
 
         edges = self._build_axis_edges()
         token_boxes = []
@@ -467,7 +471,7 @@ class LogRectilinearFoveator(torch.nn.Module):
         crop_half = self.pattern_size / 2.0
         buffer_size = self.axis_bins * self.token_size
         buffer_half = buffer_size / 2.0
-        lam = crop_half / (math.e - 1.0)
+        lam = self.lambda_scale * crop_half / (math.e - 1.0)
 
         edges: list[int] = []
         for boundary_index in range(self.axis_bins + 1):

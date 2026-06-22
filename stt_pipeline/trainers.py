@@ -424,6 +424,108 @@ def _run_periodic_eval(
     return None
 
 
+def _build_mae_val_loader(config: ExperimentConfig, ctx: DistributedContext) -> DataLoader | None:
+    """Deterministic held-out MAE validation loader (main process only).
+
+    Uses ``num_workers=0`` so worker_seed is 0 and ``MAETrainingManifestDataset``
+    samples the same center for each index on every pass, and ``shuffle=False``
+    so the same val subset is scored at every evaluation step.
+    """
+    if not ctx.is_main_process:
+        return None
+    if not config.mae.val_manifest or not config.mae.val_every:
+        return None
+    dataset = MAETrainingManifestDataset(
+        manifest_path=config.mae.val_manifest,
+        margin=config.mae.margin,
+        seed=config.runtime.seed,
+    )
+    return DataLoader(
+        dataset,
+        batch_size=config.runtime.micro_batch_size,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=collate_samples,
+        drop_last=False,
+        pin_memory=config.runtime.pin_memory,
+    )
+
+
+@torch.no_grad()
+def _run_mae_validation(
+    *,
+    config: ExperimentConfig,
+    trainer: torch.nn.Module,
+    foveator,
+    device: torch.device,
+    amp_dtype,
+    val_loader: DataLoader | None,
+    ctx: DistributedContext,
+) -> dict[str, float] | None:
+    """Compute held-out MAE reconstruction loss with reproducible masking."""
+    if not ctx.is_main_process or val_loader is None:
+        return None
+
+    model = unwrap_model(trainer)
+    was_training = model.training
+    model.eval()
+
+    cpu_rng_state = torch.get_rng_state()
+    cuda_rng_state = torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+    torch.manual_seed(config.mae.val_mask_seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed(config.mae.val_mask_seed)
+
+    losses: list[float] = []
+    mask_fracs: list[float] = []
+    seen = 0
+    try:
+        for samples in val_loader:
+            if seen >= config.mae.val_max_examples:
+                break
+            token_batch = []
+            valid_batch = []
+            for sample in samples:
+                image = sample.image.to(device, non_blocking=config.runtime.pin_memory)
+                base_center = sample.center.to(device, non_blocking=config.runtime.pin_memory)
+                for _ in range(config.mae.val_views_per_image):
+                    if config.mae.val_jitter_radius > 0:
+                        jitter = torch.randint(
+                            -config.mae.val_jitter_radius,
+                            config.mae.val_jitter_radius + 1,
+                            (2,),
+                            device=device,
+                        )
+                        center = (base_center + jitter).clamp(min=0)
+                    else:
+                        center = base_center
+                    tokens, valid_mask, _ = build_model_inputs(image, center, foveator)
+                    token_batch.append(tokens)
+                    valid_batch.append(valid_mask)
+                seen += 1
+            tokens = torch.stack(token_batch).float()
+            valid_mask = torch.stack(valid_batch).to(device, non_blocking=True)
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+                _, metrics = model(tokens, valid_mask, config.mae.mask_ratio)
+            losses.append(metrics["loss"])
+            mask_fracs.append(metrics["mask_fraction"])
+    finally:
+        torch.set_rng_state(cpu_rng_state)
+        if cuda_rng_state is not None:
+            torch.cuda.set_rng_state(cuda_rng_state, device)
+        if was_training:
+            model.train()
+
+    if not losses:
+        return None
+    return {
+        "loss": sum(losses) / len(losses),
+        "mask_fraction": sum(mask_fracs) / len(mask_fracs),
+        "num_batches": float(len(losses)),
+        "num_examples": float(seen),
+    }
+
+
 @torch.no_grad()
 def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
     startup_started_at = time.time()
@@ -525,6 +627,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
         epoch = 0
         iterator = _build_iterator(loader, sampler, epoch)
         world_batch = config.runtime.micro_batch_size * ctx.world_size * config.mae.views_per_image
+        val_loader = _build_mae_val_loader(config, ctx)
         start_step = _load_resume_state(config, trainer, optimizer, scaler, ctx)
         if ctx.is_main_process:
             _update_status(run_dir, config, phase="mae", state="running", step=start_step, ctx=ctx)
@@ -659,6 +762,30 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 distributed_barrier(ctx)
                 if checkpoint_path is not None:
                     _update_status(run_dir, config, phase="mae", state="checkpointed", step=step, ctx=ctx)
+
+            if config.mae.val_every and step > 0 and step % config.mae.val_every == 0:
+                val_summary = _run_mae_validation(
+                    config=config,
+                    trainer=trainer,
+                    foveator=foveator,
+                    device=device,
+                    amp_dtype=amp_dtype,
+                    val_loader=val_loader,
+                    ctx=ctx,
+                )
+                if ctx.is_main_process and val_summary is not None:
+                    append_jsonl(run_dir / "mae_val_metrics.jsonl", {"step": step, **val_summary})
+                    wandb_log(wandb_run, {f"val/{k}": v for k, v in val_summary.items()}, step=step)
+                    _update_status(
+                        run_dir,
+                        config,
+                        phase="mae",
+                        state="validated",
+                        step=step,
+                        ctx=ctx,
+                        extra_lines=[f"- val_loss: `{val_summary['loss']:.6f}`"],
+                    )
+                distributed_barrier(ctx)
 
         if ctx.is_main_process:
             save_checkpoint(

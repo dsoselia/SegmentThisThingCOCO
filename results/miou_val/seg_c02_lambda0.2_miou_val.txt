@@ -1,0 +1,16 @@
+# Seg c=0.2  (lambda_scale=0.2, exponent=4.0) — COCO val mIoU history
+# manifest=coco2017_val, n=1000 examples, eval_every=1000
+#   step  global_miou
+    1000       0.2660
+    2000       0.2835
+    3000       0.2954
+    4000       0.2901
+    5000       0.3129
+    6000       0.3111
+    7000       0.3201
+    8000       0.3265
+    9000       0.3172
+   10000       0.3218
+   11000       0.3286
+   12000       0.3368
+# best: step 12000  miou=0.3368  (n_evals=12)

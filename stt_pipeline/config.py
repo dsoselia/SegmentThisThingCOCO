@@ -17,6 +17,7 @@ class ModelConfig:
     log_rect_axis_bins: int | None = None
     log_rect_exponent: float = 4.0
     log_rect_center_width: int | None = None
+    log_rect_lambda_scale: float = 1.0
     num_masks: int = 3
 
 
@@ -67,6 +68,12 @@ class RuntimeConfig:
 class MAEConfig:
     enabled: bool = True
     train_manifest: Optional[str] = None
+    val_manifest: Optional[str] = None
+    val_every: int | None = None
+    val_max_examples: int = 128
+    val_views_per_image: int = 1
+    val_jitter_radius: int = 0
+    val_mask_seed: int = 1234
     lr: float = 2 ** -13
     weight_decay: float = 1e-3
     warmup_steps: int = 10_000

@@ -246,7 +246,16 @@ def set_rng_state(state: dict[str, Any] | None) -> None:
     np.random.set_state(state["numpy"])
     torch.random.set_rng_state(state["torch_cpu"])
     if torch.cuda.is_available() and state.get("torch_cuda"):
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        cuda_states = state["torch_cuda"]
+        num_devices = torch.cuda.device_count()
+        if len(cuda_states) == num_devices:
+            torch.cuda.set_rng_state_all(cuda_states)
+        else:
+            # Device-count mismatch (e.g. resuming a multi-GPU checkpoint on
+            # fewer GPUs). Restore per-device RNG only for devices that exist;
+            # set_rng_state_all would index a missing generator and raise.
+            for idx in range(min(num_devices, len(cuda_states))):
+                torch.cuda.set_rng_state(cuda_states[idx], idx)
 
 
 def gpu_memory_snapshot(device: torch.device) -> dict[str, float]:
