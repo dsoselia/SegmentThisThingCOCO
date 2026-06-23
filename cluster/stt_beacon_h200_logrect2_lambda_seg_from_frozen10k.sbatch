@@ -53,7 +53,7 @@ fi
 GPU_WATCH="$PROJECT/slurm/${SLURM_JOB_NAME}-${SLURM_JOB_ID}-gpu_watch.csv"
 ( while true; do nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits >> "$GPU_WATCH"; sleep 10; done ) &
 GPU_WATCH_PID=$!
-( while true; do sleep 900; wandb sync "$OUTPUT_ROOT"/seg_*/wandb/offline-run-* >/dev/null 2>&1 || true; done ) &
+( while true; do sleep 900; wandb sync --include-synced "$OUTPUT_ROOT"/seg_*/wandb/wandb/offline-run-* >/dev/null 2>&1 || true; done ) &
 WANDB_SYNC_PID=$!
 trap 'kill "$GPU_WATCH_PID" "$WANDB_SYNC_PID" 2>/dev/null || true' EXIT
 
@@ -62,7 +62,7 @@ set +e
 python scripts/run_stt.py train-stt --config "$CONFIG"
 STATUS=$?
 set -e
-wandb sync "$OUTPUT_ROOT"/seg_*/wandb/offline-run-* || true
+wandb sync --include-synced "$OUTPUT_ROOT"/seg_*/wandb/wandb/offline-run-* || true
 if [[ "$STATUS" -ne 0 ]]; then exit "$STATUS"; fi
 LATEST_RUN=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name 'seg_*' | sort | tail -1)
 if [[ -f "$LATEST_RUN/final_model.pt" ]]; then
