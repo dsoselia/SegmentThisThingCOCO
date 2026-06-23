@@ -69,6 +69,35 @@ def load_checkpoint(
     return {"model": state, "step": 0, "extra": {}}
 
 
+def load_segmentation_components(
+    model: torch.nn.Module,
+    foveator: torch.nn.Module,
+    checkpoint_path: str | Path,
+    *,
+    strict: bool = True,
+) -> dict[str, Any]:
+    """Load either a legacy STT checkpoint or a joint segmentation/foveator checkpoint."""
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+    if any(key.startswith("segment_model.") for key in state):
+        model_state = {
+            key.removeprefix("segment_model."): value
+            for key, value in state.items()
+            if key.startswith("segment_model.")
+        }
+        foveator_state = {
+            key.removeprefix("foveator."): value
+            for key, value in state.items()
+            if key.startswith("foveator.")
+        }
+        model.load_state_dict(model_state, strict=strict)
+        if foveator_state:
+            foveator.load_state_dict(foveator_state, strict=False)
+    else:
+        model.load_state_dict(state, strict=strict)
+    return payload if isinstance(payload, dict) else {"model": payload, "step": 0, "extra": {}}
+
+
 def save_checkpoint(
     path: str | Path,
     model: torch.nn.Module,

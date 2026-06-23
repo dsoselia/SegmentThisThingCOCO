@@ -96,6 +96,7 @@ class SegmentationConfig:
     enabled: bool = True
     train_manifest: Optional[str] = None
     pretrained_encoder: Optional[str] = None
+    pretrained_mae_checkpoint: Optional[str] = None
     init_checkpoint: Optional[str] = None
     lr: float = 2 ** -16
     weight_decay: float = 1e-3

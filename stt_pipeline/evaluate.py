@@ -9,7 +9,7 @@ import torch.distributed as dist
 
 from .config import ExperimentConfig
 from .data import EvalManifestDataset, resolve_eval_manifests
-from .modeling import build_foveator, build_model, load_checkpoint
+from .modeling import build_foveator, build_model, load_segmentation_components
 from .runtime import build_run_dir, finish_wandb_run, get_device, init_wandb_run, save_run_metadata, wandb_log, write_json
 from .transforms import build_model_inputs, maybe_resize_small_image, reconstruct_logits_to_image
 
@@ -124,7 +124,7 @@ def evaluate_checkpoint(
         foveator = build_foveator(config.model).to(device)
         model = build_model(config.model.size, foveator)
         if checkpoint_path is not None:
-            load_checkpoint(model, checkpoint_path, strict=True)
+            load_segmentation_components(model, foveator, checkpoint_path, strict=True)
         model = model.to(device).eval()
 
         manifest_summaries = {}

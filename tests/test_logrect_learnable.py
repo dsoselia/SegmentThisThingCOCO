@@ -4,6 +4,8 @@ import unittest
 import torch
 
 from segment_this_thing.foveation import LogRectilinearFoveator
+from stt_pipeline.data import SegmentationBatch
+from stt_pipeline.trainers import _materialize_segmentation_batch
 
 
 def _raw_for_lambda(value: float, epsilon: float = 1e-6) -> float:
@@ -58,6 +60,26 @@ class LearnableLogRectTests(unittest.TestCase):
         foveator = LogRectilinearFoveator(16, 1280, 13, lambda_scale=1.0)
         expected = torch.tensor([390, 153, 41, 16, 16, 16, 16, 16, 16, 16, 40, 153, 391], dtype=torch.float32)
         self.assertTrue(torch.allclose(foveator._build_axis_edges_tensor().diff(), expected, atol=1.0, rtol=0.0))
+
+    def test_segmentation_target_is_detached_while_image_path_trains_lambda(self):
+        foveator = LogRectilinearFoveator(4, 256, 13, lambda_scale=1.0, lambda_learnable=True)
+        image = torch.randint(0, 256, (300, 300, 3), dtype=torch.uint8)
+        mask = torch.zeros((300, 300), dtype=torch.bool)
+        mask[80:220, 80:220] = True
+        batch = SegmentationBatch(
+            images=[image], masks=[mask], centers=torch.tensor([[150, 150]]),
+            dataset_names=["test"], image_paths=["test.png"], preprocessing={},
+        )
+        tokens, _, target, _ = _materialize_segmentation_batch(
+            batch, foveator, torch.device("cpu"), non_blocking=False
+        )
+        self.assertTrue(tokens.requires_grad)
+        self.assertFalse(target.requires_grad)
+        weights = torch.linspace(0.0, 1.0, tokens.numel()).reshape_as(tokens)
+        (tokens * weights).mean().backward()
+        self.assertIsNotNone(foveator.raw_lambda_scale.grad)
+        self.assertTrue(torch.isfinite(foveator.raw_lambda_scale.grad))
+        self.assertGreater(foveator.raw_lambda_scale.grad.abs(), 0)
 
 
 if __name__ == "__main__":

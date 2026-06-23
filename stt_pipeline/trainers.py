@@ -20,7 +20,7 @@ from .data import MAETrainingManifestDataset, SegmentationBatch, SegmentationTra
 from .evaluate import evaluate_checkpoint
 from .losses import multimask_segmentation_loss
 from .mae import FoveatedMAE
-from .modeling import build_foveator, build_model, load_checkpoint, save_checkpoint
+from .modeling import build_foveator, build_model, load_checkpoint, load_segmentation_components, save_checkpoint
 from .runtime import (
     DistributedContext,
     append_jsonl,
@@ -49,6 +49,22 @@ from .transforms import build_model_inputs, project_mask_to_foveation
 
 
 _STOP_REQUESTED = False
+
+
+class FoveatedSegmentationTrainingModule(torch.nn.Module):
+    """Owns both trainable segmentation weights and foveation parameters."""
+
+    def __init__(self, segment_model: torch.nn.Module, foveator: torch.nn.Module):
+        super().__init__()
+        self.segment_model = segment_model
+        self.foveator = foveator
+
+    @property
+    def image_encoder(self):
+        return self.segment_model.image_encoder
+
+    def forward(self, image_tokens: torch.Tensor, valid_masks: torch.Tensor):
+        return self.segment_model(image_tokens, valid_masks)
 
 
 def _request_graceful_stop(signum, _frame) -> None:
@@ -324,6 +340,25 @@ def _build_mae_optimizer(config: ExperimentConfig, trainer: torch.nn.Module) -> 
     )
 
 
+def _build_segmentation_optimizer(config: ExperimentConfig, trainer: torch.nn.Module) -> torch.optim.Optimizer:
+    module = unwrap_model(trainer)
+    lambda_parameter = getattr(module.foveator, "raw_lambda_scale", None)
+    if lambda_parameter is None:
+        return torch.optim.AdamW(module.parameters(), lr=config.segmentation.lr, weight_decay=config.segmentation.weight_decay)
+    base_parameters = [parameter for parameter in module.parameters() if parameter is not lambda_parameter]
+    return torch.optim.AdamW(
+        [
+            {"params": base_parameters, "lr": config.segmentation.lr, "weight_decay": config.segmentation.weight_decay},
+            {
+                "params": [lambda_parameter],
+                "lr": config.model.log_rect_lambda_lr,
+                "weight_decay": 0.0,
+                "name": "foveation_lambda",
+            },
+        ]
+    )
+
+
 def _set_lambda_trainability(config: ExperimentConfig, trainer: torch.nn.Module, step: int) -> bool:
     foveator = getattr(unwrap_model(trainer), "foveator", None)
     if foveator is None or not hasattr(foveator, "set_lambda_learnable"):
@@ -345,10 +380,90 @@ def _lambda_metrics(trainer: torch.nn.Module) -> dict[str, float]:
     widths = upper - lower
     return {
         "lambda_scale": float(foveator.lambda_scale.detach().cpu()),
+        "lambda_raw": float(parameter.detach().cpu()),
         "lambda_grad_abs": 0.0 if parameter.grad is None else float(parameter.grad.detach().abs().cpu()),
         "lambda_learnable": float(parameter.requires_grad),
         "lambda_min_bin_width": float(widths.detach().amin().cpu()),
     }
+
+
+def _lambda_learning_rate(optimizer: torch.optim.Optimizer) -> float | None:
+    for group in optimizer.param_groups:
+        if group.get("name") == "foveation_lambda":
+            return float(group["lr"])
+    return None
+
+
+def _load_mae_segmentation_initialization(
+    trainer: FoveatedSegmentationTrainingModule,
+    checkpoint_path: str | Path,
+) -> None:
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
+    encoder_state = {
+        key.removeprefix("image_encoder."): value
+        for key, value in state.items()
+        if key.startswith("image_encoder.")
+    }
+    if not encoder_state:
+        raise ValueError(f"MAE checkpoint has no image_encoder weights: {checkpoint_path}")
+    trainer.image_encoder.load_state_dict(encoder_state, strict=True)
+    foveator_state = {
+        key.removeprefix("foveator."): value
+        for key, value in state.items()
+        if key.startswith("foveator.")
+    }
+    if foveator_state:
+        trainer.foveator.load_state_dict(foveator_state, strict=False)
+
+
+def _materialize_segmentation_batch(
+    batch: SegmentationBatch,
+    foveator: torch.nn.Module,
+    device: torch.device,
+    *,
+    non_blocking: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
+    tokens = []
+    valid_masks = []
+    targets = []
+    image_cache: dict[str, torch.Tensor] = {}
+    host_to_device_time = 0.0
+    foveation_build_time = 0.0
+    target_projection_time = 0.0
+
+    for image, mask, center, image_path in zip(batch.images, batch.masks, batch.centers, batch.image_paths):
+        transfer_start = time.time()
+        if image_path not in image_cache:
+            image_cache[image_path] = image.to(device, non_blocking=non_blocking)
+        device_image = image_cache[image_path]
+        device_mask = mask.to(device, non_blocking=non_blocking)
+        device_center = center.to(device, non_blocking=non_blocking)
+        host_to_device_time += time.time() - transfer_start
+
+        foveation_start = time.time()
+        sample_tokens, sample_valid_mask, _ = build_model_inputs(device_image, device_center, foveator)
+        foveation_build_time += time.time() - foveation_start
+
+        target_start = time.time()
+        sample_target, _ = project_mask_to_foveation(foveator, device_mask, device_center)
+        target_projection_time += time.time() - target_start
+        tokens.append(sample_tokens)
+        valid_masks.append(sample_valid_mask)
+        # Lambda is optimized through the image/model path, never by moving the labels.
+        targets.append(sample_target.detach())
+
+    return (
+        torch.stack(tokens).float(),
+        torch.stack(valid_masks).bool(),
+        torch.stack(targets).float(),
+        {
+            "host_to_device_time": host_to_device_time,
+            "foveation_build_time": foveation_build_time,
+            "target_projection_time": target_projection_time,
+            "valid_token_count": float(sum(mask.sum().item() for mask in valid_masks)),
+        },
+    )
 
 
 def _maybe_wrap_ddp(model: torch.nn.Module, device: torch.device, ctx: DistributedContext) -> torch.nn.Module:
@@ -626,14 +741,17 @@ def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
         prompt_noise_std=config.segmentation.prompt_noise_std,
     )
     foveator = build_foveator(config.model).to(device)
-    model = build_model(config.model.size, foveator).to(device).eval()
+    segment_model = build_model(config.model.size, foveator).to(device)
+    model = FoveatedSegmentationTrainingModule(segment_model, foveator).to(device).eval()
     if config.segmentation.init_checkpoint:
-        load_checkpoint(model, config.segmentation.init_checkpoint, strict=True)
+        load_segmentation_components(model.segment_model, model.foveator, config.segmentation.init_checkpoint, strict=True)
+    if config.segmentation.pretrained_mae_checkpoint:
+        _load_mae_segmentation_initialization(model, config.segmentation.pretrained_mae_checkpoint)
     iterator = iter(loader)
     batch = next(iterator)
-    tokens = batch.tokens.to(device, non_blocking=config.runtime.pin_memory)
-    valid_masks = batch.valid_masks.to(device, non_blocking=config.runtime.pin_memory)
-    target = batch.target_masks.to(device, non_blocking=config.runtime.pin_memory)
+    tokens, valid_masks, target, timings = _materialize_segmentation_batch(
+        batch, model.foveator, device, non_blocking=config.runtime.pin_memory
+    )
     pred_masks, pred_iou = model(_normalize_tokens(tokens), valid_masks)
     return {
         "manifest": config.segmentation.train_manifest,
@@ -649,8 +767,8 @@ def run_segmentation_preflight(config: ExperimentConfig) -> dict[str, Any]:
         "image_decode_time": batch.preprocessing.get("image_decode_time"),
         "mask_decode_time": batch.preprocessing.get("mask_decode_time"),
         "prompt_sample_time": batch.preprocessing.get("prompt_sample_time"),
-        "foveation_build_time": batch.preprocessing.get("foveation_build_time"),
-        "target_projection_time": batch.preprocessing.get("target_projection_time"),
+        "foveation_build_time": timings["foveation_build_time"],
+        "target_projection_time": timings["target_projection_time"],
         "startup_elapsed_s": round(time.time() - startup_started_at, 3),
     }
 
@@ -957,6 +1075,10 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
 
 
 def run_segmentation_training(config: ExperimentConfig) -> Path:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = False
+    if hasattr(signal, "SIGUSR1"):
+        signal.signal(signal.SIGUSR1, _request_graceful_stop)
     ctx = init_distributed(config.runtime)
     wandb_run = None
     try:
@@ -1009,25 +1131,31 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                 detail=_startup_detail(startup_started_at, f"dataset_len={len(loader.dataset)}"),
             )
         foveator = build_foveator(config.model).to(device)
-        model = build_model(config.model.size, foveator).to(device)
+        segment_model = build_model(config.model.size, foveator).to(device)
+        model = FoveatedSegmentationTrainingModule(segment_model, foveator).to(device)
         if config.segmentation.init_checkpoint and not config.runtime.resume_from:
-            load_checkpoint(model, config.segmentation.init_checkpoint, strict=True)
+            load_segmentation_components(model.segment_model, model.foveator, config.segmentation.init_checkpoint, strict=True)
+        if config.segmentation.pretrained_mae_checkpoint and not config.runtime.resume_from:
+            _load_mae_segmentation_initialization(model, config.segmentation.pretrained_mae_checkpoint)
         if config.segmentation.pretrained_encoder and not config.runtime.resume_from:
             state = torch.load(config.segmentation.pretrained_encoder, map_location="cpu", weights_only=False)
             encoder_state = state["model"] if isinstance(state, dict) and "model" in state else state
             model.image_encoder.load_state_dict(encoder_state, strict=False)
         model = _maybe_wrap_ddp(model, device, ctx)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config.segmentation.lr, weight_decay=config.segmentation.weight_decay)
+        _set_lambda_trainability(config, model, 0)
+        optimizer = _build_segmentation_optimizer(config, model)
         scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and amp_dtype == torch.float16)
         epoch = 0
         iterator = _build_iterator(loader, sampler, epoch)
         segments_per_image = config.segmentation.max_segments_per_image if config.segmentation.sample_multiple_segments_per_image else 1
         world_batch = config.runtime.micro_batch_size * ctx.world_size * segments_per_image
         start_step = _load_resume_state(config, model, optimizer, scaler, ctx)
+        _set_lambda_trainability(config, model, start_step)
         if ctx.is_main_process:
             _update_status(run_dir, config, phase="segmentation", state="running", step=start_step, ctx=ctx)
 
         for step in range(start_step, config.runtime.num_steps):
+            _set_lambda_trainability(config, model, step)
             target_batch = _scheduled_batch_size(
                 step,
                 config.segmentation.target_batch_schedule,
@@ -1077,22 +1205,24 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                         phase="segmentation",
                         step=step,
                         stage="first_batch_fetched",
-                        detail=_startup_detail(startup_started_at, f"batch_len={batch.tokens.shape[0]}"),
+                        detail=_startup_detail(startup_started_at, f"batch_len={len(batch.images)}"),
                     )
 
                 compute_start = time.time()
-                host_to_device_start = time.time()
-                image_tokens = batch.tokens.to(device, non_blocking=config.runtime.pin_memory)
-                valid_masks = batch.valid_masks.to(device, non_blocking=config.runtime.pin_memory)
-                target_masks = batch.target_masks.to(device, non_blocking=config.runtime.pin_memory)
-                host_to_device_time = time.time() - host_to_device_start
-                host_to_device_total += host_to_device_time
+                active_foveator = unwrap_model(model).foveator
+                image_tokens, valid_masks, target_masks, materialize_timings = _materialize_segmentation_batch(
+                    batch,
+                    active_foveator,
+                    device,
+                    non_blocking=config.runtime.pin_memory,
+                )
+                host_to_device_total += materialize_timings["host_to_device_time"]
                 image_decode_total += float(batch.preprocessing.get("image_decode_time", 0.0))
                 mask_decode_total += float(batch.preprocessing.get("mask_decode_time", 0.0))
                 prompt_sample_total += float(batch.preprocessing.get("prompt_sample_time", 0.0))
-                foveation_build_total += float(batch.preprocessing.get("foveation_build_time", 0.0))
-                target_projection_total += float(batch.preprocessing.get("target_projection_time", 0.0))
-                valid_token_total += float(batch.preprocessing.get("valid_token_count", 0.0))
+                foveation_build_total += materialize_timings["foveation_build_time"]
+                target_projection_total += materialize_timings["target_projection_time"]
+                valid_token_total += materialize_timings["valid_token_count"]
 
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
                     pred_masks, pred_iou = model(_normalize_tokens(image_tokens), valid_masks)
@@ -1159,9 +1289,17 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                         "host_to_device_time": host_to_device_total,
                         "stack_batch_time": 0.0,
                         "valid_token_count": valid_token_total,
+                        **_lambda_metrics(model),
                     },
                 )
-                wandb_log(wandb_run, {f"train/{k}": v for k, v in summary.items() if k != "step"}, step=step)
+                lambda_lr = _lambda_learning_rate(optimizer)
+                if lambda_lr is not None:
+                    summary["lambda_lr"] = lambda_lr
+                wandb_payload = {f"train/{k}": v for k, v in summary.items() if k != "step"}
+                for key in ("lambda_scale", "lambda_raw", "lambda_grad_abs", "lambda_learnable", "lambda_min_bin_width", "lambda_lr"):
+                    if key in summary:
+                        wandb_payload[f"foveation/{key}"] = summary[key]
+                wandb_log(wandb_run, wandb_payload, step=step)
 
             should_checkpoint = step % config.runtime.save_every == 0 or step == (config.runtime.num_steps - 1)
             checkpoint_path = None
@@ -1210,6 +1348,30 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                         wandb_log(wandb_run, {f"eval/{k}": v for k, v in summary.items()}, step=step)
                 distributed_barrier(ctx)
 
+            if _STOP_REQUESTED:
+                interruption_path = _save_training_checkpoint(
+                    run_dir,
+                    config,
+                    model,
+                    optimizer,
+                    scaler,
+                    step=step,
+                    ctx=ctx,
+                    extra={"phase": "segmentation", "interrupted": True},
+                )
+                distributed_barrier(ctx)
+                if ctx.is_main_process:
+                    _update_status(
+                        run_dir,
+                        config,
+                        phase="segmentation",
+                        state="interrupted",
+                        step=step,
+                        ctx=ctx,
+                        extra_lines=[f"- interruption_checkpoint: `{interruption_path}`"],
+                    )
+                return run_dir
+
         if ctx.is_main_process:
             save_checkpoint(
                 run_dir / "final_model.pt",
@@ -1239,7 +1401,7 @@ def run_benchmark(config: ExperimentConfig) -> dict:
     foveator = build_foveator(config.model).to(device)
     model = build_model(config.model.size, foveator).to(device).eval()
     if config.benchmark.checkpoint:
-        load_checkpoint(model, config.benchmark.checkpoint, strict=True)
+        load_segmentation_components(model, foveator, config.benchmark.checkpoint, strict=True)
     image = torch.randint(0, 255, (config.benchmark.image_size, config.benchmark.image_size, 3), dtype=torch.uint8, device=device)
     center = torch.tensor([config.benchmark.image_size // 2, config.benchmark.image_size // 2], device=device)
     tokens, valid_mask, _ = build_model_inputs(image, center, foveator)

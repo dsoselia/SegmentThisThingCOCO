@@ -6,11 +6,25 @@ PROJECT="${PROJECT:-/beacon-projects/foveatedseg}"
 STAGE_ROOT="${STAGE_ROOT:-/tmp/foveatedseg-coco-${USER}}"
 LOCK_FILE="${STAGE_ROOT}.lock"
 MARKER="$STAGE_ROOT/.complete"
+SOURCE_RAW="$PROJECT/data/coco2017/raw"
+MANIFEST_NAMES=(
+  coco2017_mae_train_images.jsonl
+  coco2017_mae_val_images.jsonl
+  coco2017_train_instances.jsonl
+  coco2017_val_instances.jsonl
+)
 
 exec 9>"$LOCK_FILE"
 flock 9
 
 if [[ -f "$MARKER" ]]; then
+  mkdir -p "$STAGE_ROOT/manifests"
+  for name in "${MANIFEST_NAMES[@]}"; do
+    if [[ ! -f "$STAGE_ROOT/manifests/$name" ]]; then
+      sed "s|$SOURCE_RAW|$STAGE_ROOT/raw|g" \
+        "$PROJECT/data/coco2017/manifests/$name" > "$STAGE_ROOT/manifests/$name"
+    fi
+  done
   echo "COCO stage already complete: $STAGE_ROOT"
   echo "$STAGE_ROOT"
   exit 0
@@ -26,8 +40,7 @@ START=$(date +%s)
 unzip -q "$PROJECT/downloads/coco2017/train2017.zip" -d "$BUILD_ROOT/raw"
 unzip -q "$PROJECT/downloads/coco2017/val2017.zip" -d "$BUILD_ROOT/raw"
 
-SOURCE_RAW="$PROJECT/data/coco2017/raw"
-for name in coco2017_mae_train_images.jsonl coco2017_mae_val_images.jsonl; do
+for name in "${MANIFEST_NAMES[@]}"; do
   sed "s|$SOURCE_RAW|$STAGE_ROOT/raw|g" \
     "$PROJECT/data/coco2017/manifests/$name" > "$BUILD_ROOT/manifests/$name"
 done

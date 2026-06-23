@@ -34,18 +34,23 @@ class Sample:
 
 @dataclass
 class SegmentationBatch:
-    tokens: torch.Tensor
-    valid_masks: torch.Tensor
-    target_masks: torch.Tensor
+    images: list[torch.Tensor]
+    masks: list[torch.Tensor]
     centers: torch.Tensor
     dataset_names: list[str]
     image_paths: list[str]
     preprocessing: dict[str, float]
 
     def pin_memory(self):
-        self.tokens = self.tokens.pin_memory()
-        self.valid_masks = self.valid_masks.pin_memory()
-        self.target_masks = self.target_masks.pin_memory()
+        pinned_images: dict[int, torch.Tensor] = {}
+        images = []
+        for image in self.images:
+            key = id(image)
+            if key not in pinned_images:
+                pinned_images[key] = image.pin_memory()
+            images.append(pinned_images[key])
+        self.images = images
+        self.masks = [mask.pin_memory() for mask in self.masks]
         self.centers = self.centers.pin_memory()
         return self
 
@@ -204,17 +209,9 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
         self.seed = seed
         self.prompt_noise_std = prompt_noise_std
         self.sample_multiple_segments_per_image = sample_multiple_segments_per_image
-        self._foveator = None
 
     def __len__(self) -> int:
         return len(self.manifest)
-
-    def _get_foveator(self):
-        if self._foveator is None:
-            from .modeling import build_foveator
-
-            self._foveator = build_foveator(self.model_config)
-        return self._foveator
 
     def _sample_segments(self, segments: list[dict], rng: random.Random) -> list[dict]:
         if not segments:
@@ -241,9 +238,6 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
         segments = entry["segments"]
         rng = random.Random(worker_seed + self.seed + index * 9973)
         selected_segments = self._sample_segments(segments, rng)
-        foveator = self._get_foveator()
-        from .transforms import build_model_inputs, project_mask_to_foveation
-
         samples: list[Sample] = []
         for segment_idx, segment in enumerate(selected_segments):
             segment = dict(segment)
@@ -265,26 +259,16 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
             center[1] = center[1].clamp(0, image.shape[0] - 1)
             timings["prompt_sample_time"] = time.perf_counter() - prompt_start
 
-            foveation_start = time.perf_counter()
-            tokens, valid_mask, _ = build_model_inputs(image, center, foveator)
-            timings["foveation_build_time"] = time.perf_counter() - foveation_start
-
-            target_start = time.perf_counter()
-            target, _ = project_mask_to_foveation(foveator, mask, center)
-            timings["target_projection_time"] = time.perf_counter() - target_start
-
             samples.append(
                 Sample(
-                    image=tokens.byte(),
-                    mask=target,
+                    image=image,
+                    mask=mask,
                     center=center,
                     dataset_name=entry.get("dataset_name", "sa1b"),
                     image_path=image_path,
                     preprocessing={
                         **timings,
-                        "valid_token_count": float(valid_mask.sum().item()),
                         "worker_seed": float(worker_seed),
-                        "valid_mask": valid_mask,
                     },
                 )
             )
@@ -366,22 +350,15 @@ def collate_segmentation_samples(samples: list[Sample | list[Sample]]) -> Segmen
             flat_samples.append(sample)
 
     samples = flat_samples
-    tokens = torch.stack([sample.image for sample in samples]).float()
-    target_masks = torch.stack([sample.mask for sample in samples]).float()
     centers = torch.stack([sample.center for sample in samples])
-    valid_masks = torch.stack([sample.preprocessing["valid_mask"] for sample in samples]).bool()
     preprocessing = {
         "image_decode_time": sum(sample.preprocessing.get("image_decode_time", 0.0) for sample in samples),
         "mask_decode_time": sum(sample.preprocessing.get("mask_decode_time", 0.0) for sample in samples),
         "prompt_sample_time": sum(sample.preprocessing.get("prompt_sample_time", 0.0) for sample in samples),
-        "foveation_build_time": sum(sample.preprocessing.get("foveation_build_time", 0.0) for sample in samples),
-        "target_projection_time": sum(sample.preprocessing.get("target_projection_time", 0.0) for sample in samples),
-        "valid_token_count": sum(sample.preprocessing.get("valid_token_count", 0.0) for sample in samples),
     }
     return SegmentationBatch(
-        tokens=tokens,
-        valid_masks=valid_masks,
-        target_masks=target_masks,
+        images=[sample.image for sample in samples],
+        masks=[sample.mask for sample in samples],
         centers=centers,
         dataset_names=[sample.dataset_name for sample in samples],
         image_paths=[sample.image_path for sample in samples],
