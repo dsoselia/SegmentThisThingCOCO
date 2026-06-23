@@ -28,6 +28,7 @@ cd "$REPO"
 source /beacon-homes/dsoselia/miniforge3/etc/profile.d/conda.sh
 conda activate stt-coco
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 WANDB_MODE=offline
+STAGE_COCO="${STAGE_COCO:-0}"
 
 SOURCE_ARGS=(--fork-from "$SOURCE")
 LATEST_RUN=$(find "$OUTPUT_ROOT" -maxdepth 1 -type d -name 'mae_*' | sort | tail -1 || true)
@@ -44,12 +45,31 @@ python scripts/build_lambda_continuation_config.py \
   --unfreeze-step "$STEP" --num-steps 10000 --save-every 500 --log-every 20 \
   --val-every 500 --val-max-examples 128 --milestone-step 10000
 
+if [[ "$STAGE_COCO" == "1" ]]; then
+  STAGE_ROOT="/tmp/foveatedseg-coco-${USER}"
+  PROJECT="$PROJECT" STAGE_ROOT="$STAGE_ROOT" bash scripts/stage_coco2017_node_local.sh
+  python - "$CONFIG" "$STAGE_ROOT" <<'PY'
+import json, sys
+path, stage_root = sys.argv[1:]
+with open(path) as handle:
+    config = json.load(handle)
+config["mae"]["train_manifest"] = f"{stage_root}/manifests/coco2017_mae_train_images.jsonl"
+config["mae"]["val_manifest"] = f"{stage_root}/manifests/coco2017_mae_val_images.jsonl"
+config["runtime"]["wandb_tags"] = sorted(set(config["runtime"].get("wandb_tags", []) + ["node-local-coco"]))
+with open(path, "w") as handle:
+    json.dump(config, handle, indent=2)
+print(f"node_local_coco={stage_root}")
+PY
+else
+  echo "COCO staging disabled; using project-storage manifests"
+fi
+
 GPU_WATCH="$PROJECT/slurm/${SLURM_JOB_NAME}-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}-gpu_watch.csv"
 ( while true; do nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits >> "$GPU_WATCH"; sleep 10; done ) &
 GPU_WATCH_PID=$!
 trap 'kill "$GPU_WATCH_PID" 2>/dev/null || true' EXIT
 
-echo "job_id=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID step=$STEP host=$(hostname) config=$CONFIG"
+echo "job_id=$SLURM_JOB_ID array_task=$SLURM_ARRAY_TASK_ID step=$STEP host=$(hostname) config=$CONFIG stage_coco=$STAGE_COCO"
 set +e
 python scripts/run_stt.py pretrain-mae --config "$CONFIG"
 STATUS=$?
