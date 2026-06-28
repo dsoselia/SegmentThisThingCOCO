@@ -36,7 +36,7 @@ def build_foveator(model_config: ModelConfig) -> Foveator | LogRectilinearFoveat
             exponent=model_config.log_rect_exponent,
             center_width=model_config.log_rect_center_width,
             lambda_scale=model_config.log_rect_lambda_scale,
-            lambda_learnable=False,
+            lambda_learnable=model_config.log_rect_lambda_learnable,
         )
     raise ValueError(f"Unsupported tokenizer_type: {model_config.tokenizer_type}")
 
