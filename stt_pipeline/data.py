@@ -87,14 +87,32 @@ def resolve_manifest_path(manifest_path: str | Path, entry_path: str | Path) -> 
 class IndexedJsonl:
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.offsets = _compute_jsonl_offsets(path)
+        self.offsets = self._load_or_compute_offsets()
+
+    @property
+    def sidecar_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".offsets.npy")
+
+    def _load_or_compute_offsets(self) -> list[int]:
+        sidecar = self.sidecar_path
+        if sidecar.exists() and sidecar.stat().st_mtime >= self.path.stat().st_mtime:
+            return np.load(sidecar).astype(np.int64).tolist()
+        return _compute_jsonl_offsets(self.path)
+
+    def write_sidecar(self) -> Path:
+        offsets = np.asarray(self.offsets, dtype=np.int64)
+        tmp_path = self.sidecar_path.with_suffix(self.sidecar_path.suffix + ".tmp")
+        with tmp_path.open("wb") as handle:
+            np.save(handle, offsets)
+        tmp_path.replace(self.sidecar_path)
+        return self.sidecar_path
 
     def __len__(self) -> int:
         return len(self.offsets)
 
     def __getitem__(self, index: int) -> dict:
         with self.path.open() as handle:
-            handle.seek(self.offsets[index])
+            handle.seek(int(self.offsets[index]))
             return json.loads(handle.readline())
 
 
@@ -175,10 +193,15 @@ class MAETrainingManifestDataset(torch.utils.data.Dataset):
     def __getitem__(self, index: int) -> Sample:
         worker = get_worker_info()
         worker_seed = 0 if worker is None else worker.seed
+        worker_id = -1 if worker is None else worker.id
         rng = random.Random(worker_seed + self.seed + index * 9973)
+        json_start = time.perf_counter()
         entry = self.manifest[index]
+        json_read_time = time.perf_counter() - json_start
         image_path = resolve_manifest_path(self.manifest_path, entry["image_path"])
+        image_load_start = time.perf_counter()
         image = load_image(image_path)
+        image_decode_time = time.perf_counter() - image_load_start
         image_size = (image.shape[1], image.shape[0])
         center = _sample_uniform_center(image_size, self.margin, rng)
         return Sample(
@@ -187,6 +210,12 @@ class MAETrainingManifestDataset(torch.utils.data.Dataset):
             center=center,
             dataset_name=entry.get("dataset_name", "sa1b"),
             image_path=image_path,
+            preprocessing={
+                "json_read_time": json_read_time,
+                "image_decode_time": image_decode_time,
+                "worker_seed": float(worker_seed),
+                "worker_id": float(worker_id),
+            },
         )
 
 
@@ -227,8 +256,11 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
     def __getitem__(self, index: int) -> Sample | list[Sample]:
         worker = get_worker_info()
         worker_seed = 0 if worker is None else worker.seed
+        worker_id = -1 if worker is None else worker.id
 
+        json_start = time.perf_counter()
         entry = self.manifest[index]
+        json_read_time = time.perf_counter() - json_start
         image_path = resolve_manifest_path(self.manifest_path, entry["image_path"])
         image_load_start = time.perf_counter()
         image = load_image(image_path)
@@ -244,6 +276,7 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
             if "mask_path" in segment:
                 segment["mask_path"] = resolve_manifest_path(self.manifest_path, segment["mask_path"])
             timings: dict[str, float] = {}
+            timings["json_read_time"] = json_read_time if segment_idx == 0 else 0.0
             timings["image_decode_time"] = image_decode_time if segment_idx == 0 else 0.0
 
             mask_load_start = time.perf_counter()
@@ -269,6 +302,7 @@ class SegmentationTrainingManifestDataset(torch.utils.data.Dataset):
                     preprocessing={
                         **timings,
                         "worker_seed": float(worker_seed),
+                        "worker_id": float(worker_id),
                     },
                 )
             )
@@ -352,9 +386,12 @@ def collate_segmentation_samples(samples: list[Sample | list[Sample]]) -> Segmen
     samples = flat_samples
     centers = torch.stack([sample.center for sample in samples])
     preprocessing = {
+        "json_read_time": sum(sample.preprocessing.get("json_read_time", 0.0) for sample in samples),
         "image_decode_time": sum(sample.preprocessing.get("image_decode_time", 0.0) for sample in samples),
         "mask_decode_time": sum(sample.preprocessing.get("mask_decode_time", 0.0) for sample in samples),
         "prompt_sample_time": sum(sample.preprocessing.get("prompt_sample_time", 0.0) for sample in samples),
+        "worker_id_min": min((sample.preprocessing.get("worker_id", -1.0) for sample in samples), default=-1.0),
+        "worker_id_max": max((sample.preprocessing.get("worker_id", -1.0) for sample in samples), default=-1.0),
     }
     return SegmentationBatch(
         images=[sample.image for sample in samples],

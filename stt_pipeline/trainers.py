@@ -431,6 +431,7 @@ def _materialize_segmentation_batch(
     host_to_device_time = 0.0
     foveation_build_time = 0.0
     target_projection_time = 0.0
+    stack_batch_time = 0.0
 
     for image, mask, center, image_path in zip(batch.images, batch.masks, batch.centers, batch.image_paths):
         transfer_start = time.time()
@@ -453,14 +454,20 @@ def _materialize_segmentation_batch(
         # Lambda is optimized through the image/model path, never by moving the labels.
         targets.append(sample_target.detach())
 
+    stack_start = time.time()
+    token_tensor = torch.stack(tokens).float()
+    valid_tensor = torch.stack(valid_masks).bool()
+    target_tensor = torch.stack(targets).float()
+    stack_batch_time = time.time() - stack_start
     return (
-        torch.stack(tokens).float(),
-        torch.stack(valid_masks).bool(),
-        torch.stack(targets).float(),
+        token_tensor,
+        valid_tensor,
+        target_tensor,
         {
             "host_to_device_time": host_to_device_time,
             "foveation_build_time": foveation_build_time,
             "target_projection_time": target_projection_time,
+            "stack_batch_time": stack_batch_time,
             "valid_token_count": float(sum(mask.sum().item() for mask in valid_masks)),
         },
     )
@@ -849,8 +856,14 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             compute_time = 0.0
             running = []
             batch_fetch_total = 0.0
+            json_read_total = 0.0
+            image_decode_total = 0.0
             host_to_device_total = 0.0
             foveation_build_total = 0.0
+            stack_batch_total = 0.0
+            model_compute_total = 0.0
+            worker_id_min = None
+            worker_id_max = None
             for _ in range(accum_steps):
                 data_start = time.time()
                 try:
@@ -888,6 +901,12 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 valid_batch = []
                 host_to_device_time = 0.0
                 foveation_build_time = 0.0
+                json_read_total += sum(float(sample.preprocessing.get("json_read_time", 0.0)) for sample in samples)
+                image_decode_total += sum(float(sample.preprocessing.get("image_decode_time", 0.0)) for sample in samples)
+                worker_ids = [float(sample.preprocessing.get("worker_id", -1.0)) for sample in samples]
+                if worker_ids:
+                    worker_id_min = min(worker_ids) if worker_id_min is None else min(worker_id_min, min(worker_ids))
+                    worker_id_max = max(worker_ids) if worker_id_max is None else max(worker_id_max, max(worker_ids))
                 for sample in samples:
                     h2d_start = time.time()
                     image = sample.image.to(device, non_blocking=config.runtime.pin_memory)
@@ -903,8 +922,11 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                         valid_batch.append(valid_mask)
                 host_to_device_total += host_to_device_time
                 foveation_build_total += foveation_build_time
+                stack_start = time.time()
                 tokens = torch.stack(token_batch).float()
                 valid_mask = torch.stack(valid_batch).to(device, non_blocking=True)
+                stack_batch_total += time.time() - stack_start
+                model_compute_start = time.time()
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
                     loss, metrics = trainer(tokens, valid_mask, config.mae.mask_ratio)
                     loss = loss / accum_steps
@@ -913,6 +935,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                         run_dir, config, ctx, phase="mae", step=step, stage="first_forward_done", detail=_startup_detail(startup_started_at)
                     )
                 scaler.scale(loss).backward()
+                model_compute_total += time.time() - model_compute_start
                 running.append(metrics)
                 compute_time += time.time() - compute_start
 
@@ -946,13 +969,17 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     device=device,
                     extra_metrics={
                         "batch_fetch_time": batch_fetch_total,
-                        "image_decode_time": 0.0,
+                        "json_read_time": json_read_total,
+                        "image_decode_time": image_decode_total,
                         "mask_decode_time": 0.0,
                         "prompt_sample_time": 0.0,
                         "foveation_build_time": foveation_build_total,
                         "target_projection_time": 0.0,
                         "host_to_device_time": host_to_device_total,
-                        "stack_batch_time": 0.0,
+                        "stack_batch_time": stack_batch_total,
+                        "model_forward_backward_time": model_compute_total,
+                        "worker_id_min": -1.0 if worker_id_min is None else worker_id_min,
+                        "worker_id_max": -1.0 if worker_id_max is None else worker_id_max,
                         **_lambda_metrics(trainer),
                     },
                 )
@@ -963,6 +990,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 wandb_log(wandb_run, wandb_payload, step=step)
             completed_steps = step + 1
             if completed_steps % config.runtime.save_every == 0 or step == (config.runtime.num_steps - 1):
+                checkpoint_start = time.time()
                 checkpoint_path = _save_training_checkpoint(
                     run_dir,
                     config,
@@ -975,9 +1003,19 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 )
                 distributed_barrier(ctx)
                 if checkpoint_path is not None:
+                    append_jsonl(
+                        run_dir / "profile_events.jsonl",
+                        {
+                            "step": step,
+                            "event": "checkpoint",
+                            "elapsed_s": time.time() - checkpoint_start,
+                            "path": str(checkpoint_path),
+                        },
+                    )
                     _update_status(run_dir, config, phase="mae", state="checkpointed", step=step, ctx=ctx)
 
             if completed_steps in set(config.runtime.milestone_steps):
+                milestone_start = time.time()
                 milestone_path = _save_milestone_checkpoint(
                     run_dir,
                     config,
@@ -990,6 +1028,15 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 )
                 distributed_barrier(ctx)
                 if milestone_path is not None:
+                    append_jsonl(
+                        run_dir / "profile_events.jsonl",
+                        {
+                            "step": step,
+                            "event": "milestone_checkpoint",
+                            "elapsed_s": time.time() - milestone_start,
+                            "path": str(milestone_path),
+                        },
+                    )
                     _update_status(
                         run_dir,
                         config,
@@ -1005,6 +1052,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     )
 
             if config.mae.val_every and completed_steps % config.mae.val_every == 0:
+                eval_start = time.time()
                 val_summary = _run_mae_validation(
                     config=config,
                     trainer=trainer,
@@ -1015,6 +1063,15 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     ctx=ctx,
                 )
                 if ctx.is_main_process and val_summary is not None:
+                    append_jsonl(
+                        run_dir / "profile_events.jsonl",
+                        {
+                            "step": step,
+                            "event": "mae_validation",
+                            "elapsed_s": time.time() - eval_start,
+                            "num_examples": val_summary.get("num_examples"),
+                        },
+                    )
                     append_jsonl(run_dir / "mae_val_metrics.jsonl", {"step": step, **val_summary})
                     wandb_log(wandb_run, {f"val/{k}": v for k, v in val_summary.items()}, step=step)
                     _update_status(
@@ -1168,13 +1225,18 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
             data_time = 0.0
             compute_time = 0.0
             batch_fetch_total = 0.0
+            json_read_total = 0.0
             image_decode_total = 0.0
             mask_decode_total = 0.0
             prompt_sample_total = 0.0
             foveation_build_total = 0.0
             target_projection_total = 0.0
             host_to_device_total = 0.0
+            stack_batch_total = 0.0
+            model_compute_total = 0.0
             valid_token_total = 0.0
+            worker_id_min = None
+            worker_id_max = None
 
             for _ in range(accum_steps):
                 data_start = time.time()
@@ -1217,13 +1279,20 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                     non_blocking=config.runtime.pin_memory,
                 )
                 host_to_device_total += materialize_timings["host_to_device_time"]
+                json_read_total += float(batch.preprocessing.get("json_read_time", 0.0))
                 image_decode_total += float(batch.preprocessing.get("image_decode_time", 0.0))
                 mask_decode_total += float(batch.preprocessing.get("mask_decode_time", 0.0))
                 prompt_sample_total += float(batch.preprocessing.get("prompt_sample_time", 0.0))
                 foveation_build_total += materialize_timings["foveation_build_time"]
                 target_projection_total += materialize_timings["target_projection_time"]
+                stack_batch_total += materialize_timings["stack_batch_time"]
                 valid_token_total += materialize_timings["valid_token_count"]
+                batch_worker_min = float(batch.preprocessing.get("worker_id_min", -1.0))
+                batch_worker_max = float(batch.preprocessing.get("worker_id_max", -1.0))
+                worker_id_min = batch_worker_min if worker_id_min is None else min(worker_id_min, batch_worker_min)
+                worker_id_max = batch_worker_max if worker_id_max is None else max(worker_id_max, batch_worker_max)
 
+                model_compute_start = time.time()
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
                     pred_masks, pred_iou = model(_normalize_tokens(image_tokens), valid_masks)
                     loss, metrics = multimask_segmentation_loss(
@@ -1248,6 +1317,7 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                         detail=_startup_detail(startup_started_at),
                     )
                 scaler.scale(loss).backward()
+                model_compute_total += time.time() - model_compute_start
                 batch_metrics.append(metrics)
                 compute_time += time.time() - compute_start
 
@@ -1281,14 +1351,18 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                     device=device,
                     extra_metrics={
                         "batch_fetch_time": batch_fetch_total,
+                        "json_read_time": json_read_total,
                         "image_decode_time": image_decode_total,
                         "mask_decode_time": mask_decode_total,
                         "prompt_sample_time": prompt_sample_total,
                         "foveation_build_time": foveation_build_total,
                         "target_projection_time": target_projection_total,
                         "host_to_device_time": host_to_device_total,
-                        "stack_batch_time": 0.0,
+                        "stack_batch_time": stack_batch_total,
+                        "model_forward_backward_time": model_compute_total,
                         "valid_token_count": valid_token_total,
+                        "worker_id_min": -1.0 if worker_id_min is None else worker_id_min,
+                        "worker_id_max": -1.0 if worker_id_max is None else worker_id_max,
                         **_lambda_metrics(model),
                     },
                 )
@@ -1304,6 +1378,7 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
             should_checkpoint = step % config.runtime.save_every == 0 or step == (config.runtime.num_steps - 1)
             checkpoint_path = None
             if should_checkpoint:
+                checkpoint_start = time.time()
                 checkpoint_path = _save_training_checkpoint(
                     run_dir,
                     config,
@@ -1315,9 +1390,20 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                     extra={"phase": "segmentation"},
                 )
                 distributed_barrier(ctx)
+                if ctx.is_main_process and checkpoint_path is not None:
+                    append_jsonl(
+                        run_dir / "profile_events.jsonl",
+                        {
+                            "step": step,
+                            "event": "checkpoint",
+                            "elapsed_s": time.time() - checkpoint_start,
+                            "path": str(checkpoint_path),
+                        },
+                    )
 
             should_eval = config.runtime.eval_every is not None and step > 0 and step % config.runtime.eval_every == 0
             if should_eval:
+                eval_start = time.time()
                 eval_checkpoint = checkpoint_path
                 if eval_checkpoint is None:
                     eval_checkpoint = run_dir / "checkpoints" / f"checkpoint_step_{step:07d}.pt"
@@ -1335,6 +1421,17 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                 distributed_barrier(ctx)
                 if eval_checkpoint.exists():
                     summary = _run_periodic_eval(config=config, checkpoint_path=eval_checkpoint, run_dir=run_dir, step=step, ctx=ctx)
+                    if summary is not None:
+                        append_jsonl(
+                            run_dir / "profile_events.jsonl",
+                            {
+                                "step": step,
+                                "event": "segmentation_eval",
+                                "elapsed_s": time.time() - eval_start,
+                                "num_examples": summary.get("num_examples"),
+                                "global_miou": summary.get("global_miou"),
+                            },
+                        )
                     _update_status(
                         run_dir,
                         config,
