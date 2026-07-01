@@ -27,18 +27,27 @@ foveator = LogRectilinearFoveator(
 )
 edges = foveator._build_axis_edges()
 widths = [right - left for left, right in zip(edges[:-1], edges[1:])]
+full_edges = foveator._build_full_bin_edges_tensor()
+full_widths = full_edges.diff()
 print("num_tokens", foveator.get_num_tokens())
 print("pattern_bounds", foveator.get_pattern_bounds_size())
 print("axis_widths", widths)
 assert foveator.get_num_tokens() == 169
-assert widths == [390, 153, 41, 16, 16, 16, 16, 16, 16, 16, 40, 153, 391]
+expected_widths = [126, 315, 131, 27, 16, 16, 16, 16, 16, 23, 124, 298, 156]
+assert widths == expected_widths, widths
+assert full_edges.numel() == 209
+assert torch.isclose(full_edges[0], torch.tensor(0.0))
+assert torch.isclose(full_edges[-1], torch.tensor(1280.0))
+assert bool(torch.all(full_widths > 0))
 assert foveator.get_pattern_bounds_size() == 1280
 tokens = foveator.extract_foveated_image(torch.zeros(3, 1280, 1280, dtype=torch.uint8))
 recon = foveator.generate_foveated_visualization(tokens)
+smooth = foveator.generate_smooth_foveated_visualization(tokens)
 print("token_shape", tuple(tokens.shape))
 print("recon_shape", tuple(recon.shape))
 assert tuple(tokens.shape) == (169, 3, 16, 16)
 assert tuple(recon.shape) == (3, 1280, 1280)
+assert tuple(smooth.shape) == (3, 1280, 1280)
 PY
 
 python scripts/run_stt.py pretrain-mae \

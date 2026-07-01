@@ -52,7 +52,7 @@ def extract_scalar_foveation(foveator, scalar_image: torch.Tensor) -> torch.Tens
             - foveator._sample_integral(integral.unsqueeze(0), bottom_left).squeeze(0)
             + foveator._sample_integral(integral.unsqueeze(0), lower).squeeze(0)
         )
-        return (summed / area).unsqueeze(1)
+        return (summed / area).clamp(0.0, 1.0).unsqueeze(1)
     grid = torch.stack(
         torch.meshgrid(
             torch.arange(foveator.token_size, device=device),

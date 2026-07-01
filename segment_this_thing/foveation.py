@@ -454,48 +454,63 @@ class LogRectilinearFoveator(torch.nn.Module):
         nonlinear = (math.exp(t**self.exponent) - 1.0) / (math.e - 1.0)
         return max(linear, nonlinear)
 
+    def _log_rect_offsets(self, du: torch.Tensor, buffer_half: float, crop_half: float) -> torch.Tensor:
+        ad = du.abs()
+        lam = self.lambda_scale * float(self.pattern_size) / (math.e - 1.0)
+        exp_term = lam * (torch.exp((ad / buffer_half) ** self.exponent) - 1.0)
+        return torch.maximum(ad, exp_term) * du.sign()
+
+    @staticmethod
+    def _make_strict_integer_edges(raw_edges: torch.Tensor, total_size: int) -> torch.Tensor:
+        """Clamp OpenCL grid boundaries into a stable monotone SAT edge array."""
+        edges = raw_edges.detach().round().clamp(0, total_size).to(torch.int64).cpu().tolist()
+        edges[0] = 0
+        edges[-1] = total_size
+        for index in range(1, len(edges)):
+            edges[index] = max(edges[index], edges[index - 1] + 1)
+        edges[-1] = total_size
+        for index in range(len(edges) - 2, -1, -1):
+            edges[index] = min(edges[index], edges[index + 1] - 1)
+        return raw_edges.new_tensor(edges, dtype=raw_edges.dtype)
+
+    def _build_full_bin_edges_tensor(self) -> torch.Tensor:
+        """Build one log-rectilinear source-space edge per packed buffer bin.
+
+        The original OpenCL implementation stores rectangle boundaries halfway
+        between neighboring mapped reduced-buffer samples. The STT tokenizer's
+        packed buffer has ``axis_bins * token_size`` bins per axis, so we build
+        all of those boundaries before grouping bins into tokens.
+        """
+        packed_size = self.axis_bins * self.token_size
+        if packed_size <= 0:
+            raise ValueError("[LogRectilinearFoveator]: invalid axis_bins/token_size.")
+
+        device = self.raw_lambda_scale.device
+        dtype = self.raw_lambda_scale.dtype
+        buffer_half = packed_size / 2.0
+        boundary_index = torch.arange(packed_size + 1, device=device, dtype=dtype)
+        left_du = boundary_index - 1.0 - buffer_half
+        right_du = boundary_index - buffer_half
+        left_delta = self._log_rect_offsets(left_du, buffer_half, self.pattern_size / 2.0)
+        right_delta = self._log_rect_offsets(right_du, buffer_half, self.pattern_size / 2.0)
+        grid_offsets = torch.floor((left_delta + right_delta) / 2.0)
+        raw_edges = self.pattern_size / 2.0 + grid_offsets
+        return self._make_strict_integer_edges(raw_edges, self.pattern_size)
+
     def _build_axis_edges_tensor(self) -> torch.Tensor:
-        """Build true log-rectilinear crop-space bin edges.
+        """Build macro token edges from full half-offset log-rectilinear bins.
 
         The previous Zaratan implementation interpolated almost linearly across
         the 1280-pixel crop, producing a weak foveation. Here we follow the
         log-rectilinear buffer-to-crop mapping from Li et al.: a small
         axis-aligned buffer of ``axis_bins * token_size`` pixels is mapped to
         the full prompt-centered crop with an identity foveal band and
-        exponentially larger peripheral bins. With the default settings this
-        yields widths close to [390, 153, 41, 16, ..., 153, 391].
+        exponentially larger peripheral bins. Rectangle boundaries are offset
+        halfway between neighboring reduced-buffer samples, matching the
+        original OpenCL grid construction.
         """
-        if self.axis_bins * self.token_size <= 0:
-            raise ValueError("[LogRectilinearFoveator]: invalid axis_bins/token_size.")
-
-        device = self.raw_lambda_scale.device
-        dtype = self.raw_lambda_scale.dtype
-        crop_half = self.pattern_size / 2.0
-        buffer_half = self.axis_bins * self.token_size / 2.0
-        du = torch.arange(self.axis_bins + 1, device=device, dtype=dtype)
-        du = du * self.token_size - buffer_half
-        ad = du.abs()
-        lam = self.lambda_scale * crop_half / (math.e - 1.0)
-        exp_term = lam * (torch.exp((ad / buffer_half) ** self.exponent) - 1.0)
-        dx = torch.maximum(ad, exp_term) * du.sign()
-        raw_edges = crop_half + dx
-        raw_edges = torch.cat(
-            [
-                raw_edges.new_zeros(1),
-                raw_edges[1:-1],
-                raw_edges.new_full((1,), float(self.pattern_size)),
-            ]
-        )
-
-        # For very large positive lambda values the unnormalized mapping can
-        # cross the fixed crop endpoints. Convert its intervals to positive
-        # widths and renormalize so every learned value remains valid.
-        raw_widths = raw_edges[1:] - raw_edges[:-1]
-        widths = F.softplus(raw_widths)
-        widths = widths * (float(self.pattern_size) / widths.sum())
-        widths = widths.clamp_min(1e-3)
-        widths = widths * (float(self.pattern_size) / widths.sum())
-        return torch.cat([widths.new_zeros(1), widths.cumsum(dim=0)])
+        full_edges = self._build_full_bin_edges_tensor()
+        return full_edges[:: self.token_size]
 
     def _build_axis_edges(self) -> list[int]:
         """Integer edge helper retained for visualization/debug scripts."""
@@ -508,24 +523,17 @@ class LogRectilinearFoveator(torch.nn.Module):
         return torch.stack([x0, y0, x1, y1], dim=-1).reshape(-1, 4)
 
     def get_bin_coordinates(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        edges = self._build_axis_edges_tensor()
-        fractions = torch.linspace(
-            0.0,
-            1.0,
-            self.token_size + 1,
-            device=edges.device,
-            dtype=edges.dtype,
-        )
-        subdivisions = edges[:-1, None] + (edges[1:] - edges[:-1])[:, None] * fractions
+        edges = self._build_full_bin_edges_tensor()
         axis_index = torch.arange(self.axis_bins, device=edges.device)
         y_index = axis_index.repeat_interleave(self.axis_bins)
         x_index = axis_index.repeat(self.axis_bins)
-        x_sub = subdivisions[x_index]
-        y_sub = subdivisions[y_index]
-        x_lower = x_sub[:, :-1, None].expand(-1, -1, self.token_size).transpose(1, 2)
-        x_upper = x_sub[:, 1:, None].expand(-1, -1, self.token_size).transpose(1, 2)
-        y_lower = y_sub[:, :-1, None].expand(-1, -1, self.token_size)
-        y_upper = y_sub[:, 1:, None].expand(-1, -1, self.token_size)
+        local = torch.arange(self.token_size, device=edges.device)
+        x_edges = x_index[:, None] * self.token_size + local[None, :]
+        y_edges = y_index[:, None] * self.token_size + local[None, :]
+        x_lower = edges[x_edges][:, None, :].expand(-1, self.token_size, -1)
+        x_upper = edges[x_edges + 1][:, None, :].expand(-1, self.token_size, -1)
+        y_lower = edges[y_edges][:, :, None].expand(-1, -1, self.token_size)
+        y_upper = edges[y_edges + 1][:, :, None].expand(-1, -1, self.token_size)
         lower = torch.stack([x_lower, y_lower], dim=-1)
         upper = torch.stack([x_upper, y_upper], dim=-1)
         area = ((upper - lower).prod(dim=-1)).clamp_min(1e-6)
@@ -577,7 +585,7 @@ class LogRectilinearFoveator(torch.nn.Module):
             - self._sample_integral(integral_image, bottom_left_coords)
             + top_left
         )
-        return (summed / area.unsqueeze(0)).permute(1, 0, 2, 3)
+        return (summed / area.unsqueeze(0)).clamp(0.0, 255.0).permute(1, 0, 2, 3)
 
     def get_in_bounds_tokens(
         self,
@@ -608,19 +616,62 @@ class LogRectilinearFoveator(torch.nn.Module):
                 f"[LogRectilinearFoveator.generate_foveated_visualization]: Expected square tokens of size {self.token_size}"
             )
 
-        output = torch.zeros((tokens.shape[1], self.pattern_size, self.pattern_size), dtype=tokens.dtype)
-        lower, upper, _ = self.get_bin_coordinates()
-        lower = lower.detach().round().long().cpu()
-        upper = upper.detach().round().long().cpu()
-        source = tokens.cpu()
+        device = tokens.device
+        packed_size = self.axis_bins * self.token_size
+        packed = (
+            tokens.reshape(self.axis_bins, self.axis_bins, tokens.shape[1], self.token_size, self.token_size)
+            .permute(2, 0, 3, 1, 4)
+            .reshape(tokens.shape[1], packed_size, packed_size)
+        )
+        edges = self._build_full_bin_edges_tensor().to(device=device)
+        coords = torch.arange(self.pattern_size, device=device, dtype=edges.dtype) + 0.5
+        bin_index = torch.bucketize(coords, edges[1:-1]).clamp(0, packed_size - 1)
+        return packed[:, bin_index[:, None], bin_index[None, :]]
 
-        for token_index in range(source.shape[0]):
-            for row in range(self.token_size):
-                for col in range(self.token_size):
-                    x0 = lower[token_index, row, col, 0].item()
-                    y0 = lower[token_index, row, col, 1].item()
-                    x1 = upper[token_index, row, col, 0].item()
-                    y1 = upper[token_index, row, col, 1].item()
-                    output[:, y0:y1, x0:x1] = source[token_index, :, row, col].view(-1, 1, 1)
+    def generate_smooth_foveated_visualization(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Diagnostic inverse-logrect preview using bilinear lookup in packed-token space.
 
-        return output
+        This mirrors the original decoder's smooth display behavior for visual
+        inspection only. Training targets and segmentation metric reconstruction
+        intentionally continue to use ``generate_foveated_visualization``.
+        """
+        if tokens.ndim != 4:
+            raise ValueError(
+                "[LogRectilinearFoveator.generate_smooth_foveated_visualization]: Expected 4D input Tensor (N, C, H, W)."
+            )
+        if tokens.shape[0] != self.get_num_tokens():
+            raise ValueError(
+                f"[LogRectilinearFoveator.generate_smooth_foveated_visualization]: Expected {self.get_num_tokens()} tokens"
+            )
+        if tokens.shape[-2] != self.token_size or tokens.shape[-1] != self.token_size:
+            raise ValueError(
+                f"[LogRectilinearFoveator.generate_smooth_foveated_visualization]: Expected square tokens of size {self.token_size}"
+            )
+
+        device = tokens.device
+        dtype = tokens.dtype if tokens.is_floating_point() else torch.float32
+        packed_size = self.axis_bins * self.token_size
+        packed = (
+            tokens.to(dtype)
+            .reshape(self.axis_bins, self.axis_bins, tokens.shape[1], self.token_size, self.token_size)
+            .permute(2, 0, 3, 1, 4)
+            .reshape(1, tokens.shape[1], packed_size, packed_size)
+        )
+
+        edges = self._build_full_bin_edges_tensor().to(device=device, dtype=dtype)
+        coords = torch.arange(self.pattern_size, device=device, dtype=dtype) + 0.5
+        bin_index = torch.bucketize(coords, edges[1:-1]).clamp(0, packed_size - 1)
+        left = edges[bin_index]
+        right = edges[bin_index + 1]
+        frac = ((coords - left) / (right - left).clamp_min(1e-6)).clamp(0.0, 1.0)
+        packed_coord = bin_index.to(dtype) + frac
+        normalized = packed_coord * (2.0 / float(packed_size - 1)) - 1.0
+        grid_y, grid_x = torch.meshgrid(normalized, normalized, indexing="ij")
+        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+        return F.grid_sample(
+            packed,
+            grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        ).squeeze(0)
