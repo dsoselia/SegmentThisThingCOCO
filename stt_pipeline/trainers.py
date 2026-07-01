@@ -45,7 +45,7 @@ from .runtime import (
     update_run_status,
     wandb_log,
 )
-from .transforms import build_model_inputs, project_mask_to_foveation
+from .transforms import build_model_inputs, build_model_inputs_batch, project_mask_to_foveation, project_masks_to_foveation_batch
 
 
 _STOP_REQUESTED = False
@@ -424,9 +424,9 @@ def _materialize_segmentation_batch(
     *,
     non_blocking: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
-    tokens = []
-    valid_masks = []
-    targets = []
+    images = []
+    masks = []
+    centers = []
     image_cache: dict[str, torch.Tensor] = {}
     host_to_device_time = 0.0
     foveation_build_time = 0.0
@@ -437,27 +437,26 @@ def _materialize_segmentation_batch(
         transfer_start = time.time()
         if image_path not in image_cache:
             image_cache[image_path] = image.to(device, non_blocking=non_blocking)
-        device_image = image_cache[image_path]
-        device_mask = mask.to(device, non_blocking=non_blocking)
-        device_center = center.to(device, non_blocking=non_blocking)
+        images.append(image_cache[image_path])
+        masks.append(mask.to(device, non_blocking=non_blocking))
+        centers.append(center.to(device, non_blocking=non_blocking))
         host_to_device_time += time.time() - transfer_start
 
-        foveation_start = time.time()
-        sample_tokens, sample_valid_mask, _ = build_model_inputs(device_image, device_center, foveator)
-        foveation_build_time += time.time() - foveation_start
+    center_tensor = torch.stack(centers)
 
-        target_start = time.time()
-        sample_target, _ = project_mask_to_foveation(foveator, device_mask, device_center)
-        target_projection_time += time.time() - target_start
-        tokens.append(sample_tokens)
-        valid_masks.append(sample_valid_mask)
-        # Lambda is optimized through the image/model path, never by moving the labels.
-        targets.append(sample_target.detach())
+    foveation_start = time.time()
+    token_tensor, valid_tensor, _ = build_model_inputs_batch(images, center_tensor, foveator)
+    foveation_build_time += time.time() - foveation_start
+
+    target_start = time.time()
+    target_tensor, _ = project_masks_to_foveation_batch(foveator, masks, center_tensor)
+    target_projection_time += time.time() - target_start
 
     stack_start = time.time()
-    token_tensor = torch.stack(tokens).float()
-    valid_tensor = torch.stack(valid_masks).bool()
-    target_tensor = torch.stack(targets).float()
+    token_tensor = token_tensor.float()
+    valid_tensor = valid_tensor.bool()
+    # Lambda is optimized through the image/model path, never by moving the labels.
+    target_tensor = target_tensor.detach().float()
     stack_batch_time = time.time() - stack_start
     return (
         token_tensor,
@@ -468,7 +467,7 @@ def _materialize_segmentation_batch(
             "foveation_build_time": foveation_build_time,
             "target_projection_time": target_projection_time,
             "stack_batch_time": stack_batch_time,
-            "valid_token_count": float(sum(mask.sum().item() for mask in valid_masks)),
+            "valid_token_count": float(valid_tensor.sum().item()),
         },
     )
 
@@ -897,8 +896,8 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     )
 
                 compute_start = time.time()
-                token_batch = []
-                valid_batch = []
+                foveation_images = []
+                foveation_centers = []
                 host_to_device_time = 0.0
                 foveation_build_time = 0.0
                 json_read_total += sum(float(sample.preprocessing.get("json_read_time", 0.0)) for sample in samples)
@@ -915,16 +914,20 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     for _ in range(config.mae.views_per_image):
                         jitter = torch.randint(-8, 9, (2,), device=device)
                         center = (base_center + jitter).clamp(min=0)
-                        foveation_start = time.time()
-                        tokens, valid_mask, _ = build_model_inputs(image, center, active_foveator)
-                        foveation_build_time += time.time() - foveation_start
-                        token_batch.append(tokens)
-                        valid_batch.append(valid_mask)
+                        foveation_images.append(image)
+                        foveation_centers.append(center)
+                foveation_start = time.time()
+                tokens, valid_mask, _ = build_model_inputs_batch(
+                    foveation_images,
+                    torch.stack(foveation_centers),
+                    active_foveator,
+                )
+                foveation_build_time += time.time() - foveation_start
                 host_to_device_total += host_to_device_time
                 foveation_build_total += foveation_build_time
                 stack_start = time.time()
-                tokens = torch.stack(token_batch).float()
-                valid_mask = torch.stack(valid_batch).to(device, non_blocking=True)
+                tokens = tokens.float()
+                valid_mask = valid_mask.to(device, non_blocking=True)
                 stack_batch_total += time.time() - stack_start
                 model_compute_start = time.time()
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):

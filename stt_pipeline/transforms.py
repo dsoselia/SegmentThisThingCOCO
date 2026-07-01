@@ -73,11 +73,44 @@ def extract_scalar_foveation(foveator, scalar_image: torch.Tensor) -> torch.Tens
     return (summed / area).unsqueeze(1)
 
 
+def extract_scalar_foveation_batch(foveator, scalar_images: torch.Tensor) -> torch.Tensor:
+    if scalar_images.ndim != 3:
+        raise ValueError(f"Expected scalar image batch with shape (B, H, W), got {tuple(scalar_images.shape)}")
+    device = scalar_images.device
+    integral = _compute_integral_map(scalar_images).unsqueeze(1)
+    if hasattr(foveator, "get_bin_coordinates") and hasattr(foveator, "_sample_integral_batch"):
+        lower, upper, area = foveator.get_bin_coordinates()
+        lower = lower.to(device)
+        upper = upper.to(device)
+        area = area.to(device).float()
+        top_right = torch.stack([upper[..., 0], lower[..., 1]], dim=-1)
+        bottom_left = torch.stack([lower[..., 0], upper[..., 1]], dim=-1)
+        summed = (
+            foveator._sample_integral_batch(integral, upper).squeeze(1)
+            - foveator._sample_integral_batch(integral, top_right).squeeze(1)
+            - foveator._sample_integral_batch(integral, bottom_left).squeeze(1)
+            + foveator._sample_integral_batch(integral, lower).squeeze(1)
+        )
+        return (summed / area).clamp(0.0, 1.0).unsqueeze(2)
+    return torch.stack([extract_scalar_foveation(foveator, image) for image in scalar_images])
+
+
 def project_mask_to_foveation(foveator, mask: torch.Tensor, center: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     crop_bounds = get_crop_bounds(center, foveator.get_pattern_bounds_size()).to(mask.device)
     crop = get_centered_mask_crop(mask.float(), crop_bounds)
     tokens = extract_scalar_foveation(foveator, crop)
     return tokens, crop_bounds
+
+
+def project_masks_to_foveation_batch(foveator, masks: list[torch.Tensor], centers: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    crops = []
+    bounds = []
+    for mask, center in zip(masks, centers):
+        crop_bounds = get_crop_bounds(center, foveator.get_pattern_bounds_size()).to(mask.device)
+        crops.append(get_centered_mask_crop(mask.float(), crop_bounds))
+        bounds.append(crop_bounds)
+    tokens = extract_scalar_foveation_batch(foveator, torch.stack(crops))
+    return tokens, torch.stack(bounds)
 
 
 def build_model_inputs(image: torch.Tensor, center: torch.Tensor, foveator, in_bounds_threshold: float = 0.0):
@@ -90,6 +123,29 @@ def build_model_inputs(image: torch.Tensor, center: torch.Tensor, foveator, in_b
     )
     tokens = foveator.extract_foveated_image(crop.permute(2, 0, 1))
     return tokens, valid_mask, crop_bounds
+
+
+def build_model_inputs_batch(images: list[torch.Tensor], centers: torch.Tensor, foveator, in_bounds_threshold: float = 0.0):
+    crops = []
+    valid_masks = []
+    bounds = []
+    for image, center in zip(images, centers):
+        crop_bounds = get_crop_bounds(center, foveator.get_pattern_bounds_size()).to(image.device)
+        crop = get_centered_crop(image, crop_bounds)
+        valid_mask = foveator.get_in_bounds_tokens(
+            torch.tensor(image.shape[1::-1], device=image.device),
+            crop_bounds,
+            in_bounds_threshold=in_bounds_threshold,
+        )
+        crops.append(crop.permute(2, 0, 1))
+        valid_masks.append(valid_mask)
+        bounds.append(crop_bounds)
+    crop_batch = torch.stack(crops)
+    if hasattr(foveator, "extract_foveated_images"):
+        tokens = foveator.extract_foveated_images(crop_batch)
+    else:
+        tokens = torch.stack([foveator.extract_foveated_image(crop) for crop in crop_batch])
+    return tokens, torch.stack(valid_masks), torch.stack(bounds)
 
 
 def reconstruct_logits_to_image(foveator, logits: torch.Tensor, crop_bounds: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:

@@ -439,6 +439,8 @@ class LogRectilinearFoveator(torch.nn.Module):
             torch.tensor(raw_lambda, dtype=torch.float32),
             requires_grad=lambda_learnable,
         )
+        self._bin_coordinate_cache_key = None
+        self._bin_coordinate_cache = None
 
     @property
     def lambda_scale(self) -> torch.Tensor:
@@ -446,6 +448,9 @@ class LogRectilinearFoveator(torch.nn.Module):
         return F.softplus(self.raw_lambda_scale) + self.lambda_epsilon
 
     def set_lambda_learnable(self, enabled: bool) -> None:
+        if enabled and not self.raw_lambda_scale.requires_grad:
+            self._bin_coordinate_cache_key = None
+            self._bin_coordinate_cache = None
         self.raw_lambda_scale.requires_grad_(enabled)
 
     def _scaled_log_rect(self, t: float) -> float:
@@ -522,7 +527,7 @@ class LogRectilinearFoveator(torch.nn.Module):
         y1, x1 = torch.meshgrid(edges[1:], edges[1:], indexing="ij")
         return torch.stack([x0, y0, x1, y1], dim=-1).reshape(-1, 4)
 
-    def get_bin_coordinates(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _compute_bin_coordinates(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         edges = self._build_full_bin_edges_tensor()
         axis_index = torch.arange(self.axis_bins, device=edges.device)
         y_index = axis_index.repeat_interleave(self.axis_bins)
@@ -539,6 +544,20 @@ class LogRectilinearFoveator(torch.nn.Module):
         area = ((upper - lower).prod(dim=-1)).clamp_min(1e-6)
         return lower, upper, area
 
+    def get_bin_coordinates(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.raw_lambda_scale.requires_grad:
+            return self._compute_bin_coordinates()
+        key = (
+            self.raw_lambda_scale.device.type,
+            self.raw_lambda_scale.device.index,
+            self.raw_lambda_scale.dtype,
+            int(self.raw_lambda_scale._version),
+        )
+        if self._bin_coordinate_cache_key != key or self._bin_coordinate_cache is None:
+            self._bin_coordinate_cache = self._compute_bin_coordinates()
+            self._bin_coordinate_cache_key = key
+        return self._bin_coordinate_cache
+
     @staticmethod
     def _sample_integral(integral: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
         height, width = integral.shape[-2:]
@@ -554,6 +573,23 @@ class LogRectilinearFoveator(torch.nn.Module):
             align_corners=True,
         )
         return sampled.squeeze(0).squeeze(-1).reshape(integral.shape[0], *coords.shape[:-1])
+
+    @staticmethod
+    def _sample_integral_batch(integral: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        height, width = integral.shape[-2:]
+        normalized = coords.to(device=integral.device, dtype=integral.dtype).clone()
+        normalized[..., 0] = normalized[..., 0] * (2.0 / (width - 1)) - 1.0
+        normalized[..., 1] = normalized[..., 1] * (2.0 / (height - 1)) - 1.0
+        batch = integral.shape[0]
+        flat_grid = normalized.reshape(1, -1, 1, 2).expand(batch, -1, -1, -1)
+        sampled = F.grid_sample(
+            integral,
+            flat_grid,
+            mode="bilinear",
+            padding_mode="border",
+            align_corners=True,
+        )
+        return sampled.squeeze(-1).reshape(batch, integral.shape[1], *coords.shape[:-1])
 
     def get_pattern_bounds_size(self) -> int:
         return self.pattern_size
@@ -586,6 +622,32 @@ class LogRectilinearFoveator(torch.nn.Module):
             + top_left
         )
         return (summed / area.unsqueeze(0)).clamp(0.0, 255.0).permute(1, 0, 2, 3)
+
+    def extract_foveated_images(self, images: torch.Tensor) -> torch.Tensor:
+        if images.ndim != 4:
+            raise ValueError("[LogRectilinearFoveator.extract_foveated_images]: Expected 4D input Tensor.")
+        if images.shape[-2] != self.pattern_size or images.shape[-1] != self.pattern_size:
+            raise ValueError(
+                f"[LogRectilinearFoveator.extract_foveated_images]: Expected square images of size {self.pattern_size}"
+            )
+        if images.shape[-3] != 3:
+            raise ValueError("[LogRectilinearFoveator.extract_foveated_images]: Expected 3-channel images.")
+        if images.dtype != torch.uint8:
+            raise ValueError("[LogRectilinearFoveator.extract_foveated_images]: Expected byte images.")
+
+        integral_image = F.pad(images.float(), (1, 0, 1, 0), mode="constant", value=0.0)
+        integral_image = integral_image.cumsum(dim=3).cumsum(dim=2)
+        lower, upper, area = self.get_bin_coordinates()
+        top_left = self._sample_integral_batch(integral_image, lower)
+        top_right_coords = torch.stack([upper[..., 0], lower[..., 1]], dim=-1)
+        bottom_left_coords = torch.stack([lower[..., 0], upper[..., 1]], dim=-1)
+        summed = (
+            self._sample_integral_batch(integral_image, upper)
+            - self._sample_integral_batch(integral_image, top_right_coords)
+            - self._sample_integral_batch(integral_image, bottom_left_coords)
+            + top_left
+        )
+        return (summed / area.view(1, 1, *area.shape)).clamp(0.0, 255.0).permute(0, 2, 1, 3, 4)
 
     def get_in_bounds_tokens(
         self,

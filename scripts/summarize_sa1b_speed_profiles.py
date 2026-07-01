@@ -80,14 +80,17 @@ def main() -> None:
 
     root = Path(args.root)
     summaries = {}
-    for run_root in sorted((root / "runs").glob("sa1b_speed_profile_*")):
+    run_roots = [
+        *sorted((root / "runs").glob("sa1b_speed_profile_*")),
+        *sorted((root / "runs").glob("sa1b_microbatch_*")),
+    ]
+    for run_root in run_roots:
         metrics_files = sorted(run_root.glob("*/metrics.jsonl"))
         if not metrics_files:
             continue
         name = run_root.name
         summary = _summarize_metrics(metrics_files[-1])
-        task_variant = name.removeprefix("sa1b_speed_profile_")
-        gpu_matches = sorted((root / "slurm").glob(f"sa1b_speed_profile_{task_variant}_*_gpu.csv"))
+        gpu_matches = sorted((root / "slurm").glob(f"{name}_*_gpu.csv"))
         if gpu_matches:
             summary["gpu"] = _summarize_gpu(gpu_matches[-1])
         event_files = sorted(run_root.glob("*/profile_events.jsonl"))

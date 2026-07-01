@@ -31,6 +31,12 @@ class Sample:
     image_path: str
     preprocessing: dict[str, Any] = field(default_factory=dict)
 
+    def pin_memory(self):
+        self.image = self.image.pin_memory()
+        self.mask = self.mask.pin_memory()
+        self.center = self.center.pin_memory()
+        return self
+
 
 @dataclass
 class SegmentationBatch:
