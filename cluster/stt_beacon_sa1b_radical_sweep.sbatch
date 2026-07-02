@@ -22,7 +22,13 @@ TASK="${TASK:?Set TASK=mae or TASK=seg}"
 MODE="${MODE:-smoke}"
 EXP="${EXP:-/beacon-homes/dsoselia/foveatedseg/SA1B_Experiments}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="${REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [[ -z "${REPO:-}" ]]; then
+  if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "$SLURM_SUBMIT_DIR/scripts/run_stt.py" ]]; then
+    REPO="$SLURM_SUBMIT_DIR"
+  else
+    REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+  fi
+fi
 mkdir -p "$EXP/slurm" "$EXP/runs" "$EXP/artifacts" "$EXP/wandb"
 cd "$REPO"
 
@@ -72,7 +78,8 @@ EFFECTIVE_BATCH="${EFFECTIVE_BATCH:-}"
 PROFILE_SUFFIX="${PROFILE_SUFFIX:-}"
 
 echo "job_id=$SLURM_JOB_ID host=$(hostname) task=$TASK mode=$MODE micro_batches=$MICRO_BATCHES cpus=${SLURM_CPUS_PER_TASK:-unset} workers=$WORKERS prefetch=$PREFETCH in_order=$IN_ORDER worker_pre_crop=$WORKER_PRE_CROP effective_batch=${EFFECTIVE_BATCH:-default}"
-echo "repo=$REPO commit=$(git rev-parse --short HEAD)"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "repo=$REPO commit=$COMMIT"
 echo "python=$(which python) CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv,noheader
 
