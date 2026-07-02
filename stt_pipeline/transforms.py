@@ -148,6 +148,30 @@ def build_model_inputs_batch(images: list[torch.Tensor], centers: torch.Tensor, 
     return tokens, torch.stack(valid_masks), torch.stack(bounds)
 
 
+def build_precomputed_crop_inputs_batch(
+    crops: list[torch.Tensor],
+    original_image_sizes: torch.Tensor,
+    crop_bounds: torch.Tensor,
+    foveator,
+    in_bounds_threshold: float = 0.0,
+):
+    crop_batch = torch.stack([crop.permute(2, 0, 1) for crop in crops])
+    valid_masks = []
+    for image_size, bounds in zip(original_image_sizes, crop_bounds):
+        valid_masks.append(
+            foveator.get_in_bounds_tokens(
+                image_size,
+                bounds,
+                in_bounds_threshold=in_bounds_threshold,
+            )
+        )
+    if hasattr(foveator, "extract_foveated_images"):
+        tokens = foveator.extract_foveated_images(crop_batch)
+    else:
+        tokens = torch.stack([foveator.extract_foveated_image(crop) for crop in crop_batch])
+    return tokens, torch.stack(valid_masks), crop_bounds
+
+
 def reconstruct_logits_to_image(foveator, logits: torch.Tensor, crop_bounds: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:
     crop = foveator.generate_foveated_visualization(logits.unsqueeze(1).cpu()).squeeze(1)
     height, width = image_size

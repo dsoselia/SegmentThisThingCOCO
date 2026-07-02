@@ -45,7 +45,13 @@ from .runtime import (
     update_run_status,
     wandb_log,
 )
-from .transforms import build_model_inputs, build_model_inputs_batch, project_mask_to_foveation, project_masks_to_foveation_batch
+from .transforms import (
+    build_model_inputs,
+    build_model_inputs_batch,
+    build_precomputed_crop_inputs_batch,
+    project_mask_to_foveation,
+    project_masks_to_foveation_batch,
+)
 
 
 _STOP_REQUESTED = False
@@ -93,6 +99,9 @@ def _build_loader(
     *,
     task: str,
     model_config=None,
+    mae_worker_pre_crop: bool = False,
+    mae_worker_pre_crop_size: int | None = None,
+    mae_worker_pre_crop_jitter_radius: int = 8,
     prompt_noise_std: float = 0.0,
     sample_multiple_segments_per_image: bool = False,
 ) -> tuple[DataLoader, DistributedSampler | None]:
@@ -112,6 +121,9 @@ def _build_loader(
             manifest_path=manifest,
             margin=margin,
             seed=runtime.seed + ctx.rank * 100_000,
+            worker_pre_crop=mae_worker_pre_crop,
+            worker_pre_crop_size=mae_worker_pre_crop_size,
+            worker_pre_crop_jitter_radius=mae_worker_pre_crop_jitter_radius,
         )
         collate_fn = collate_samples
     sampler = None
@@ -224,6 +236,7 @@ def _mark_startup_stage(
         f"- pin_memory_device: `{config.runtime.pin_memory_device}`",
         f"- dataloader_in_order: `{config.runtime.dataloader_in_order}`",
         f"- dataloader_timeout_s: `{config.runtime.dataloader_timeout_s}`",
+        f"- mae_worker_pre_crop: `{config.mae.worker_pre_crop}`",
     ]
     if detail:
         extra.append(f"- startup_detail: `{detail}`")
@@ -249,6 +262,7 @@ def _startup_context_lines(config: ExperimentConfig, device: torch.device, ctx: 
         f"- pin_memory_device: `{config.runtime.pin_memory_device}`",
         f"- dataloader_in_order: `{config.runtime.dataloader_in_order}`",
         f"- dataloader_timeout_s: `{config.runtime.dataloader_timeout_s}`",
+        f"- mae_worker_pre_crop: `{config.mae.worker_pre_crop}`",
     ]
 
 
@@ -814,7 +828,21 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 extra_lines=[* _startup_context_lines(config, device, ctx), f"- wandb_status: `{wandb_status}`"],
             )
 
-        loader, sampler = _build_loader(config.mae.train_manifest, config.runtime, config.mae.margin, 1, ctx, task="mae")
+        if config.mae.worker_pre_crop and config.mae.views_per_image != 1:
+            raise ValueError("mae.worker_pre_crop currently requires mae.views_per_image == 1")
+        if config.mae.worker_pre_crop and config.model.pattern_size is None:
+            raise ValueError("mae.worker_pre_crop requires model.pattern_size")
+        loader, sampler = _build_loader(
+            config.mae.train_manifest,
+            config.runtime,
+            config.mae.margin,
+            1,
+            ctx,
+            task="mae",
+            mae_worker_pre_crop=config.mae.worker_pre_crop,
+            mae_worker_pre_crop_size=config.model.pattern_size,
+            mae_worker_pre_crop_jitter_radius=config.mae.worker_pre_crop_jitter_radius,
+        )
         if ctx.is_main_process:
             _mark_startup_stage(
                 run_dir,
@@ -861,6 +889,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             foveation_build_total = 0.0
             stack_batch_total = 0.0
             model_compute_total = 0.0
+            worker_crop_total = 0.0
             worker_id_min = None
             worker_id_max = None
             for _ in range(accum_steps):
@@ -898,10 +927,13 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 compute_start = time.time()
                 foveation_images = []
                 foveation_centers = []
+                foveation_crop_bounds = []
+                foveation_original_sizes = []
                 host_to_device_time = 0.0
                 foveation_build_time = 0.0
                 json_read_total += sum(float(sample.preprocessing.get("json_read_time", 0.0)) for sample in samples)
                 image_decode_total += sum(float(sample.preprocessing.get("image_decode_time", 0.0)) for sample in samples)
+                worker_crop_total += sum(float(sample.preprocessing.get("worker_crop_time", 0.0)) for sample in samples)
                 worker_ids = [float(sample.preprocessing.get("worker_id", -1.0)) for sample in samples]
                 if worker_ids:
                     worker_id_min = min(worker_ids) if worker_id_min is None else min(worker_id_min, min(worker_ids))
@@ -910,18 +942,36 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                     h2d_start = time.time()
                     image = sample.image.to(device, non_blocking=config.runtime.pin_memory)
                     base_center = sample.center.to(device, non_blocking=config.runtime.pin_memory)
+                    if config.mae.worker_pre_crop:
+                        if sample.crop_bounds is None or sample.original_image_size is None:
+                            raise RuntimeError("worker_pre_crop sample is missing crop metadata")
+                        crop_bounds = sample.crop_bounds.to(device, non_blocking=config.runtime.pin_memory)
+                        original_size = sample.original_image_size.to(device, non_blocking=config.runtime.pin_memory)
                     host_to_device_time += time.time() - h2d_start
                     for _ in range(config.mae.views_per_image):
-                        jitter = torch.randint(-8, 9, (2,), device=device)
-                        center = (base_center + jitter).clamp(min=0)
+                        if config.mae.worker_pre_crop:
+                            center = base_center
+                            foveation_crop_bounds.append(crop_bounds)
+                            foveation_original_sizes.append(original_size)
+                        else:
+                            jitter = torch.randint(-8, 9, (2,), device=device)
+                            center = (base_center + jitter).clamp(min=0)
                         foveation_images.append(image)
                         foveation_centers.append(center)
                 foveation_start = time.time()
-                tokens, valid_mask, _ = build_model_inputs_batch(
-                    foveation_images,
-                    torch.stack(foveation_centers),
-                    active_foveator,
-                )
+                if config.mae.worker_pre_crop:
+                    tokens, valid_mask, _ = build_precomputed_crop_inputs_batch(
+                        foveation_images,
+                        torch.stack(foveation_original_sizes),
+                        torch.stack(foveation_crop_bounds),
+                        active_foveator,
+                    )
+                else:
+                    tokens, valid_mask, _ = build_model_inputs_batch(
+                        foveation_images,
+                        torch.stack(foveation_centers),
+                        active_foveator,
+                    )
                 foveation_build_time += time.time() - foveation_start
                 host_to_device_total += host_to_device_time
                 foveation_build_total += foveation_build_time
@@ -974,6 +1024,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                         "batch_fetch_time": batch_fetch_total,
                         "json_read_time": json_read_total,
                         "image_decode_time": image_decode_total,
+                        "worker_crop_time": worker_crop_total,
                         "mask_decode_time": 0.0,
                         "prompt_sample_time": 0.0,
                         "foveation_build_time": foveation_build_total,

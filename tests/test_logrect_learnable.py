@@ -1,11 +1,22 @@
+import json
 import math
+from pathlib import Path
+import tempfile
 import unittest
 
 import torch
+from PIL import Image
 
 from segment_this_thing.foveation import LogRectilinearFoveator
-from stt_pipeline.data import SegmentationBatch
-from stt_pipeline.transforms import build_model_inputs, build_model_inputs_batch, project_mask_to_foveation, project_masks_to_foveation_batch
+from segment_this_thing.utils import get_centered_crop, get_crop_bounds
+from stt_pipeline.data import IndexedJsonl, MAETrainingManifestDataset, SegmentationBatch
+from stt_pipeline.transforms import (
+    build_model_inputs,
+    build_model_inputs_batch,
+    build_precomputed_crop_inputs_batch,
+    project_mask_to_foveation,
+    project_masks_to_foveation_batch,
+)
 from stt_pipeline.trainers import _materialize_segmentation_batch
 
 
@@ -14,6 +25,42 @@ def _raw_for_lambda(value: float, epsilon: float = 1e-6) -> float:
 
 
 class FixedLogRectTests(unittest.TestCase):
+    def test_indexed_jsonl_sidecar_uses_unique_temp_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = Path(tmp) / "manifest.jsonl"
+            manifest_path.write_text('{"image_path": "a.jpg"}\n{"image_path": "b.jpg"}\n')
+            indexed = IndexedJsonl(manifest_path)
+            first_sidecar = indexed.write_sidecar()
+            second_sidecar = indexed.write_sidecar()
+            self.assertEqual(first_sidecar, second_sidecar)
+            self.assertTrue(first_sidecar.exists())
+            self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
+
+    def test_mae_worker_pre_crop_returns_crop_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "image.jpg"
+            Image.new("RGB", (1500, 1400), (17, 23, 31)).save(image_path)
+            manifest_path = root / "manifest.jsonl"
+            manifest_path.write_text(json.dumps({"image_path": str(image_path), "dataset_name": "test"}) + "\n")
+            dataset = MAETrainingManifestDataset(
+                manifest_path=manifest_path,
+                margin=0,
+                seed=123,
+                worker_pre_crop=True,
+                worker_pre_crop_size=1280,
+                worker_pre_crop_jitter_radius=0,
+            )
+            sample = dataset[0]
+            self.assertEqual(tuple(sample.image.shape), (1280, 1280, 3))
+            self.assertEqual(sample.center.tolist(), [640, 640])
+            self.assertIsNotNone(sample.crop_bounds)
+            self.assertIsNotNone(sample.original_image_size)
+            self.assertEqual(sample.original_image_size.tolist(), [1500, 1400])
+            self.assertEqual((sample.crop_bounds[1] - sample.crop_bounds[0]).tolist(), [1280, 1280])
+            self.assertEqual(sample.preprocessing["worker_pre_crop"], 1.0)
+            self.assertGreaterEqual(sample.preprocessing["worker_crop_time"], 0.0)
+
     def test_axis_geometry_stays_valid_and_symmetric(self):
         foveator = LogRectilinearFoveator(4, 256, 13, lambda_scale=1.0, lambda_learnable=True)
         for value in (0.01, 1.0, 100.0):
@@ -130,6 +177,30 @@ class FixedLogRectTests(unittest.TestCase):
         self.assertTrue(torch.allclose(torch.stack(single_tokens).float(), batch_tokens.float()))
         self.assertTrue(torch.equal(torch.stack(single_valid), batch_valid))
         self.assertTrue(torch.equal(torch.stack(single_bounds), batch_bounds))
+
+    def test_precomputed_crop_input_builder_matches_standard_path(self):
+        foveator = LogRectilinearFoveator(4, 256, 13, lambda_scale=1.0, lambda_learnable=False)
+        generator = torch.Generator().manual_seed(19)
+        images = [torch.randint(0, 256, (300, 280, 3), dtype=torch.uint8, generator=generator) for _ in range(3)]
+        centers = torch.tensor([[140, 150], [30, 40], [260, 250]], dtype=torch.int64)
+        standard_tokens, standard_valid, standard_bounds = build_model_inputs_batch(images, centers, foveator)
+        crops = []
+        original_sizes = []
+        crop_bounds = []
+        for image, center in zip(images, centers):
+            bounds = get_crop_bounds(center, foveator.get_pattern_bounds_size())
+            crops.append(get_centered_crop(image, bounds))
+            original_sizes.append(torch.tensor(image.shape[1::-1], dtype=torch.int64))
+            crop_bounds.append(bounds)
+        precomputed_tokens, precomputed_valid, precomputed_bounds = build_precomputed_crop_inputs_batch(
+            crops,
+            torch.stack(original_sizes),
+            torch.stack(crop_bounds),
+            foveator,
+        )
+        self.assertTrue(torch.allclose(standard_tokens.float(), precomputed_tokens.float()))
+        self.assertTrue(torch.equal(standard_valid, precomputed_valid))
+        self.assertTrue(torch.equal(standard_bounds, precomputed_bounds))
 
     def test_batched_mask_projection_matches_single_path(self):
         foveator = LogRectilinearFoveator(4, 256, 13, lambda_scale=1.0, lambda_learnable=False)

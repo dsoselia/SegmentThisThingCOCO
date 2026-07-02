@@ -85,6 +85,8 @@ class MAEConfig:
     mask_ratio: float = 0.75
     margin: int = 256
     views_per_image: int = 2
+    worker_pre_crop: bool = False
+    worker_pre_crop_jitter_radius: int = 8
     effective_batch_size: int = 1024
     target_batch_schedule: Dict[str, int] = field(
         default_factory=lambda: {"0": 1024, "100000": 2048, "200000": 4096, "300000": 8192, "400000": 16384}

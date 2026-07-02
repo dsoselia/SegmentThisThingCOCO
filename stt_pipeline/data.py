@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -11,6 +12,8 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from torch.utils.data import get_worker_info
+
+from segment_this_thing.utils import get_centered_crop, get_crop_bounds
 
 
 def _optional_import_pycocotools():
@@ -29,12 +32,18 @@ class Sample:
     center: torch.Tensor
     dataset_name: str
     image_path: str
+    crop_bounds: torch.Tensor | None = None
+    original_image_size: torch.Tensor | None = None
     preprocessing: dict[str, Any] = field(default_factory=dict)
 
     def pin_memory(self):
         self.image = self.image.pin_memory()
         self.mask = self.mask.pin_memory()
         self.center = self.center.pin_memory()
+        if self.crop_bounds is not None:
+            self.crop_bounds = self.crop_bounds.pin_memory()
+        if self.original_image_size is not None:
+            self.original_image_size = self.original_image_size.pin_memory()
         return self
 
 
@@ -107,7 +116,7 @@ class IndexedJsonl:
 
     def write_sidecar(self) -> Path:
         offsets = np.asarray(self.offsets, dtype=np.int64)
-        tmp_path = self.sidecar_path.with_suffix(self.sidecar_path.suffix + ".tmp")
+        tmp_path = self.sidecar_path.with_suffix(self.sidecar_path.suffix + f".{os.getpid()}.tmp")
         with tmp_path.open("wb") as handle:
             np.save(handle, offsets)
         tmp_path.replace(self.sidecar_path)
@@ -187,11 +196,26 @@ def _sample_uniform_center(image_size: tuple[int, int], margin: int, rng: random
 
 
 class MAETrainingManifestDataset(torch.utils.data.Dataset):
-    def __init__(self, manifest_path: str | Path, margin: int, seed: int = 1337):
+    def __init__(
+        self,
+        manifest_path: str | Path,
+        margin: int,
+        seed: int = 1337,
+        worker_pre_crop: bool = False,
+        worker_pre_crop_size: int | None = None,
+        worker_pre_crop_jitter_radius: int = 8,
+    ):
         self.manifest = IndexedJsonl(manifest_path)
         self.manifest_path = str(manifest_path)
         self.margin = margin
         self.seed = seed
+        self.worker_pre_crop = worker_pre_crop
+        self.worker_pre_crop_size = worker_pre_crop_size
+        self.worker_pre_crop_jitter_radius = worker_pre_crop_jitter_radius
+        if self.worker_pre_crop and self.worker_pre_crop_size is None:
+            raise ValueError("worker_pre_crop_size is required when worker_pre_crop=True")
+        if self.worker_pre_crop and self.worker_pre_crop_size <= 0:
+            raise ValueError("worker_pre_crop_size must be positive when worker_pre_crop=True")
 
     def __len__(self) -> int:
         return len(self.manifest)
@@ -210,15 +234,38 @@ class MAETrainingManifestDataset(torch.utils.data.Dataset):
         image_decode_time = time.perf_counter() - image_load_start
         image_size = (image.shape[1], image.shape[0])
         center = _sample_uniform_center(image_size, self.margin, rng)
+        crop_bounds = None
+        original_image_size = None
+        crop_time = 0.0
+        if self.worker_pre_crop:
+            if self.worker_pre_crop_jitter_radius > 0:
+                jitter = torch.tensor(
+                    [
+                        rng.randint(-self.worker_pre_crop_jitter_radius, self.worker_pre_crop_jitter_radius),
+                        rng.randint(-self.worker_pre_crop_jitter_radius, self.worker_pre_crop_jitter_radius),
+                    ],
+                    dtype=torch.int64,
+                )
+                center = (center + jitter).clamp(min=0)
+            crop_start = time.perf_counter()
+            crop_bounds = get_crop_bounds(center, int(self.worker_pre_crop_size))
+            original_image_size = torch.tensor(image_size, dtype=torch.int64)
+            image = get_centered_crop(image, crop_bounds).contiguous()
+            center = torch.tensor([int(self.worker_pre_crop_size) // 2, int(self.worker_pre_crop_size) // 2], dtype=torch.int64)
+            crop_time = time.perf_counter() - crop_start
         return Sample(
             image=image,
             mask=torch.zeros((1, 1), dtype=torch.bool),
             center=center,
             dataset_name=entry.get("dataset_name", "sa1b"),
             image_path=image_path,
+            crop_bounds=crop_bounds,
+            original_image_size=original_image_size,
             preprocessing={
                 "json_read_time": json_read_time,
                 "image_decode_time": image_decode_time,
+                "worker_crop_time": crop_time,
+                "worker_pre_crop": float(self.worker_pre_crop),
                 "worker_seed": float(worker_seed),
                 "worker_id": float(worker_id),
             },
