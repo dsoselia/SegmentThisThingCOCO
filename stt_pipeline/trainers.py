@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 import inspect
 import math
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -178,6 +180,17 @@ def _make_run_dir(config: ExperimentConfig, prefix: str) -> Path:
         (run_dir / "eval").mkdir(parents=True, exist_ok=True)
         return run_dir
     return build_run_dir(config.runtime.output_dir, prefix)
+
+
+def _make_distributed_run_dir(config: ExperimentConfig, prefix: str, ctx: DistributedContext) -> Path:
+    if not ctx.enabled or config.runtime.resume_from:
+        return _make_run_dir(config, prefix)
+    payload = [str(_make_run_dir(config, prefix)) if ctx.is_main_process else ""]
+    dist.broadcast_object_list(payload, src=0)
+    run_dir = Path(payload[0])
+    (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (run_dir / "eval").mkdir(parents=True, exist_ok=True)
+    return run_dir
 
 
 def _update_status(
@@ -622,6 +635,40 @@ def _record_training_metrics(
     return summary
 
 
+def _ddp_no_sync_context(model: torch.nn.Module, ctx: DistributedContext, *, sync_gradients: bool):
+    if not ctx.enabled or sync_gradients or not hasattr(model, "no_sync"):
+        return nullcontext()
+    return model.no_sync()
+
+
+def _distributed_timing_metrics(
+    ctx: DistributedContext,
+    device: torch.device,
+    metrics: dict[str, float],
+) -> dict[str, float]:
+    if not ctx.enabled or not dist.is_initialized():
+        return {"ddp_world_size": 1.0}
+    keys = sorted(metrics)
+    values = torch.tensor([float(metrics[key]) for key in keys], dtype=torch.float64, device=device)
+    summed = values.clone()
+    maxed = values.clone()
+    mined = values.clone()
+    dist.all_reduce(summed, op=dist.ReduceOp.SUM)
+    dist.all_reduce(maxed, op=dist.ReduceOp.MAX)
+    dist.all_reduce(mined, op=dist.ReduceOp.MIN)
+    meaned = summed / float(ctx.world_size)
+    summary: dict[str, float] = {
+        "ddp_world_size": float(ctx.world_size),
+        "ddp_rank": float(ctx.rank),
+        "ddp_local_rank": float(ctx.local_rank),
+    }
+    for index, key in enumerate(keys):
+        summary[f"ddp_{key}_mean"] = float(meaned[index].detach().cpu())
+        summary[f"ddp_{key}_max"] = float(maxed[index].detach().cpu())
+        summary[f"ddp_{key}_min"] = float(mined[index].detach().cpu())
+    return summary
+
+
 def _run_periodic_eval(
     *,
     config: ExperimentConfig,
@@ -806,7 +853,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
         seed_everything(config.runtime.seed + ctx.rank)
         device = get_device(config.runtime.device, ctx)
         amp_dtype = get_autocast_dtype(config.runtime.amp_dtype)
-        run_dir = _make_run_dir(config, "mae")
+        run_dir = _make_distributed_run_dir(config, "mae", ctx)
         if ctx.is_main_process:
             save_run_metadata(run_dir, config, {"phase": "mae", "profile_name": config.runtime.profile_name})
             wandb_run, wandb_status = init_wandb_run(
@@ -892,7 +939,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             worker_crop_total = 0.0
             worker_id_min = None
             worker_id_max = None
-            for _ in range(accum_steps):
+            for accum_index in range(accum_steps):
                 data_start = time.time()
                 try:
                     samples, iterator, epoch, rolled_epoch = _advance_iterator(loader, sampler, iterator, epoch)
@@ -980,14 +1027,21 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                 valid_mask = valid_mask.to(device, non_blocking=True)
                 stack_batch_total += time.time() - stack_start
                 model_compute_start = time.time()
-                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
-                    loss, metrics = trainer(tokens, valid_mask, config.mae.mask_ratio)
-                    loss = loss / accum_steps
-                if step == start_step and ctx.is_main_process:
-                    _mark_startup_stage(
-                        run_dir, config, ctx, phase="mae", step=step, stage="first_forward_done", detail=_startup_detail(startup_started_at)
-                    )
-                scaler.scale(loss).backward()
+                with _ddp_no_sync_context(trainer, ctx, sync_gradients=accum_index == accum_steps - 1):
+                    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+                        loss, metrics = trainer(tokens, valid_mask, config.mae.mask_ratio)
+                        loss = loss / accum_steps
+                    if step == start_step and ctx.is_main_process:
+                        _mark_startup_stage(
+                            run_dir,
+                            config,
+                            ctx,
+                            phase="mae",
+                            step=step,
+                            stage="first_forward_done",
+                            detail=_startup_detail(startup_started_at),
+                        )
+                    scaler.scale(loss).backward()
                 model_compute_total += time.time() - model_compute_start
                 running.append(metrics)
                 compute_time += time.time() - compute_start
@@ -1007,6 +1061,22 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
             elapsed = time.time() - start
             if ctx.is_main_process:
                 _mark_running_status(run_dir, config, ctx, phase="mae", step=step, epoch=epoch)
+            ddp_timing_metrics = {}
+            if step % config.runtime.log_every == 0:
+                ddp_timing_metrics = _distributed_timing_metrics(
+                    ctx,
+                    device,
+                    {
+                        "elapsed": elapsed,
+                        "data_time": data_time,
+                        "compute_time": compute_time,
+                        "batch_fetch_time": batch_fetch_total,
+                        "host_to_device_time": host_to_device_total,
+                        "foveation_build_time": foveation_build_total,
+                        "stack_batch_time": stack_batch_total,
+                        "model_forward_backward_time": model_compute_total,
+                    },
+                )
             if ctx.is_main_process and step % config.runtime.log_every == 0:
                 summary = _record_training_metrics(
                     metrics_path=run_dir / "metrics.jsonl",
@@ -1034,6 +1104,7 @@ def run_mae_pretraining(config: ExperimentConfig) -> Path:
                         "model_forward_backward_time": model_compute_total,
                         "worker_id_min": -1.0 if worker_id_min is None else worker_id_min,
                         "worker_id_max": -1.0 if worker_id_max is None else worker_id_max,
+                        **ddp_timing_metrics,
                         **_lambda_metrics(trainer),
                     },
                 )
@@ -1198,7 +1269,7 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
         seed_everything(config.runtime.seed + ctx.rank)
         device = get_device(config.runtime.device, ctx)
         amp_dtype = get_autocast_dtype(config.runtime.amp_dtype)
-        run_dir = _make_run_dir(config, "seg")
+        run_dir = _make_distributed_run_dir(config, "seg", ctx)
         if ctx.is_main_process:
             save_run_metadata(run_dir, config, {"phase": "segmentation", "profile_name": config.runtime.profile_name})
             wandb_run, wandb_status = init_wandb_run(
@@ -1292,7 +1363,7 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
             worker_id_min = None
             worker_id_max = None
 
-            for _ in range(accum_steps):
+            for accum_index in range(accum_steps):
                 data_start = time.time()
                 try:
                     batch, iterator, epoch, rolled_epoch = _advance_iterator(loader, sampler, iterator, epoch)
@@ -1347,30 +1418,31 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                 worker_id_max = batch_worker_max if worker_id_max is None else max(worker_id_max, batch_worker_max)
 
                 model_compute_start = time.time()
-                with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
-                    pred_masks, pred_iou = model(_normalize_tokens(image_tokens), valid_masks)
-                    loss, metrics = multimask_segmentation_loss(
-                        pred_masks,
-                        pred_iou,
-                        target_masks,
-                        focal_weight=config.segmentation.focal_weight,
-                        dice_weight=config.segmentation.dice_weight,
-                        iou_weight=config.segmentation.iou_weight,
-                        focal_alpha=config.segmentation.focal_alpha,
-                        focal_gamma=config.segmentation.focal_gamma,
-                    )
-                    loss = loss / accum_steps
-                if step == start_step and ctx.is_main_process:
-                    _mark_startup_stage(
-                        run_dir,
-                        config,
-                        ctx,
-                        phase="segmentation",
-                        step=step,
-                        stage="first_forward_done",
-                        detail=_startup_detail(startup_started_at),
-                    )
-                scaler.scale(loss).backward()
+                with _ddp_no_sync_context(model, ctx, sync_gradients=accum_index == accum_steps - 1):
+                    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+                        pred_masks, pred_iou = model(_normalize_tokens(image_tokens), valid_masks)
+                        loss, metrics = multimask_segmentation_loss(
+                            pred_masks,
+                            pred_iou,
+                            target_masks,
+                            focal_weight=config.segmentation.focal_weight,
+                            dice_weight=config.segmentation.dice_weight,
+                            iou_weight=config.segmentation.iou_weight,
+                            focal_alpha=config.segmentation.focal_alpha,
+                            focal_gamma=config.segmentation.focal_gamma,
+                        )
+                        loss = loss / accum_steps
+                    if step == start_step and ctx.is_main_process:
+                        _mark_startup_stage(
+                            run_dir,
+                            config,
+                            ctx,
+                            phase="segmentation",
+                            step=step,
+                            stage="first_forward_done",
+                            detail=_startup_detail(startup_started_at),
+                        )
+                    scaler.scale(loss).backward()
                 model_compute_total += time.time() - model_compute_start
                 batch_metrics.append(metrics)
                 compute_time += time.time() - compute_start
@@ -1390,6 +1462,23 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
             elapsed = time.time() - start
             if ctx.is_main_process:
                 _mark_running_status(run_dir, config, ctx, phase="segmentation", step=step, epoch=epoch)
+            ddp_timing_metrics = {}
+            if step % config.runtime.log_every == 0:
+                ddp_timing_metrics = _distributed_timing_metrics(
+                    ctx,
+                    device,
+                    {
+                        "elapsed": elapsed,
+                        "data_time": data_time,
+                        "compute_time": compute_time,
+                        "batch_fetch_time": batch_fetch_total,
+                        "host_to_device_time": host_to_device_total,
+                        "foveation_build_time": foveation_build_total,
+                        "target_projection_time": target_projection_total,
+                        "stack_batch_time": stack_batch_total,
+                        "model_forward_backward_time": model_compute_total,
+                    },
+                )
             if ctx.is_main_process and step % config.runtime.log_every == 0:
                 summary = _record_training_metrics(
                     metrics_path=run_dir / "metrics.jsonl",
@@ -1417,6 +1506,7 @@ def run_segmentation_training(config: ExperimentConfig) -> Path:
                         "valid_token_count": valid_token_total,
                         "worker_id_min": -1.0 if worker_id_min is None else worker_id_min,
                         "worker_id_max": -1.0 if worker_id_max is None else worker_id_max,
+                        **ddp_timing_metrics,
                         **_lambda_metrics(model),
                     },
                 )

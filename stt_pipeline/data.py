@@ -413,8 +413,20 @@ class EvalManifestDataset(torch.utils.data.Dataset):
         entry = self.entries[index]
         image = load_image(entry["image_path"])
         image_size = (image.shape[1], image.shape[0])
-        mask = load_mask(entry["segment"], image_size)
-        center = _furthest_point_with_fallback(mask)
+        segment = entry["segment"]
+        mask = load_mask(segment, image_size)
+        if "center" in segment:
+            center_values = segment["center"]
+            center = torch.tensor([int(center_values[0]), int(center_values[1])], dtype=torch.int64)
+        elif "point" in segment:
+            point_values = segment["point"]
+            center = torch.tensor([int(point_values[0]), int(point_values[1])], dtype=torch.int64)
+        elif "prompt_x" in segment and "prompt_y" in segment:
+            center = torch.tensor([int(segment["prompt_x"]), int(segment["prompt_y"])], dtype=torch.int64)
+        else:
+            center = _furthest_point_with_fallback(mask)
+        center[0] = center[0].clamp(0, image.shape[1] - 1)
+        center[1] = center[1].clamp(0, image.shape[0] - 1)
         return Sample(
             image=image,
             mask=mask,
