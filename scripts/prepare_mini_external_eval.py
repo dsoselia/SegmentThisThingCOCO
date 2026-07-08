@@ -128,6 +128,8 @@ def _prepare_config(
     profile_prefix: str,
     mode: str,
     max_examples: int | None,
+    wandb_project: str,
+    wandb_tags: list[str],
 ) -> Path:
     config = _read_json(base_config)
     config["runtime"].update(
@@ -144,20 +146,11 @@ def _prepare_config(
             "resume_from": None,
             "fork_from": None,
             "wandb_enabled": mode == "full",
-            "wandb_project": "SegmentThisThingSA1BExternalEval",
+            "wandb_project": wandb_project,
             "wandb_mode": "offline",
             "wandb_dir": str(out_dir / "wandb"),
             "wandb_run_name": run_name if mode == "full" else f"{run_name}-smoke",
-            "wandb_tags": [
-                "stt",
-                "sa1b",
-                "external-eval",
-                "mini-200x5",
-                "logrect",
-                "fixed-lambda",
-                "h100",
-                "offline",
-            ],
+            "wandb_tags": wandb_tags,
         }
     )
     config["evaluation"] = {
@@ -191,6 +184,12 @@ def main() -> None:
     parser.add_argument("--internal-miou", type=float, default=None)
     parser.add_argument("--no-copy-checkpoint", action="store_true")
     parser.add_argument("--no-strict-mini-counts", action="store_true")
+    parser.add_argument("--wandb-project", default="SegmentThisThingSA1BExternalEval")
+    parser.add_argument(
+        "--wandb-tags",
+        nargs="*",
+        default=["stt", "sa1b", "external-eval", "mini-200x5", "logrect", "fixed-lambda", "h100", "offline"],
+    )
     args = parser.parse_args()
 
     pack = args.pack.resolve()
@@ -214,6 +213,8 @@ def main() -> None:
         profile_prefix=args.profile_prefix,
         mode="smoke",
         max_examples=5,
+        wandb_project=args.wandb_project,
+        wandb_tags=args.wandb_tags,
     )
     full_config = _prepare_config(
         base_config=args.base_config,
@@ -224,6 +225,8 @@ def main() -> None:
         profile_prefix=args.profile_prefix,
         mode="full",
         max_examples=None,
+        wandb_project=args.wandb_project,
+        wandb_tags=args.wandb_tags,
     )
     selection = {
         "artifact_dir": str(out_dir),
