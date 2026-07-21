@@ -4,6 +4,7 @@
 #   sbatch --export=ALL,TASK=seg,MODE=smoke,MICRO_BATCHES=4,EFFECTIVE_BATCH=32,WORKERS=4,PREFETCH=8 cluster/stt_beacon_sa1b_ddp_sweep.sbatch
 #   sbatch --export=ALL,TASK=mae,MODE=probe,MICRO_BATCHES=64,EFFECTIVE_BATCH=128,WORKERS=6,PREFETCH=8,WORKER_PRE_CROP=true cluster/stt_beacon_sa1b_ddp_sweep.sbatch
 #   sbatch --time=3-00:00:00 --export=ALL,TASK=mae,MODE=long,MICRO_BATCHES=64,EFFECTIVE_BATCH=128,WORKERS=6,PREFETCH=8,WORKER_PRE_CROP=true cluster/stt_beacon_sa1b_ddp_sweep.sbatch
+#   sbatch --time=3-00:00:00 --export=ALL,TASK=mae,MODE=long,RESUME_FROM=/path/to/checkpoint.pt,VAL_EVERY=1000,VAL_MAX_EXAMPLES=32 cluster/stt_beacon_sa1b_ddp_sweep.sbatch
 
 #SBATCH --job-name=sa1b-ddp
 #SBATCH --partition=beacon
@@ -82,6 +83,7 @@ case "$MODE" in
 esac
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+GPU_TYPE="${GPU_TYPE:-h100}"
 MICRO_BATCHES="${MICRO_BATCHES:-$DEFAULT_MICRO_BATCHES}"
 WORKERS="${WORKERS:-4}"
 PREFETCH="${PREFETCH:-8}"
@@ -93,13 +95,26 @@ RUN_UNIT_TESTS="${RUN_UNIT_TESTS:-true}"
 RUN_NUMERIC_CHECK="${RUN_NUMERIC_CHECK:-true}"
 RUN_GRAD_CHECK="${RUN_GRAD_CHECK:-true}"
 GRAD_TASK="${GRAD_TASK:-$DEFAULT_GRAD_TASK}"
-GPUS_TAG="${GPUS_TAG:-${NPROC_PER_NODE}xh100}"
+GPUS_TAG="${GPUS_TAG:-${NPROC_PER_NODE}x${GPU_TYPE}}"
 WANDB_PROJECT="${WANDB_PROJECT:-}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-}"
 WANDB_MODE="${WANDB_MODE:-offline}"
-MAE_TARGET_BATCH_SCHEDULE="${MAE_TARGET_BATCH_SCHEDULE:-}"
-MAE_WARMUP_STEPS="${MAE_WARMUP_STEPS:-}"
-MAE_BATCH_DOUBLE_EVERY="${MAE_BATCH_DOUBLE_EVERY:-}"
+RESUME_FROM="${RESUME_FROM:-}"
+FORK_FROM="${FORK_FROM:-}"
+VAL_EVERY="${VAL_EVERY:-}"
+VAL_MAX_EXAMPLES="${VAL_MAX_EXAMPLES:-}"
+TARGET_BATCH_SCHEDULE="${TARGET_BATCH_SCHEDULE:-${MAE_TARGET_BATCH_SCHEDULE:-}}"
+WARMUP_STEPS="${WARMUP_STEPS:-${MAE_WARMUP_STEPS:-}}"
+BATCH_DOUBLE_EVERY="${BATCH_DOUBLE_EVERY:-${MAE_BATCH_DOUBLE_EVERY:-}}"
+VIEWS_PER_IMAGE="${VIEWS_PER_IMAGE:-}"
+MAX_SEGMENTS_PER_IMAGE="${MAX_SEGMENTS_PER_IMAGE:-}"
+PRETRAINED_ENCODER="${PRETRAINED_ENCODER:-}"
+PRETRAINED_MAE_CHECKPOINT="${PRETRAINED_MAE_CHECKPOINT:-}"
+INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
+if [[ -n "$RESUME_FROM" && -n "$FORK_FROM" ]]; then
+  echo "RESUME_FROM and FORK_FROM are mutually exclusive" >&2
+  exit 1
+fi
 if [[ "$MODE" == "long" ]]; then
   SAVE_EVERY="${SAVE_EVERY:-10000}"
   MILESTONE_EVERY="${MILESTONE_EVERY:-50000}"
@@ -120,7 +135,7 @@ fi
 
 stage_manifests() {
   local task="$1"
-  local source_dir="${SOURCE_DIR:-$EXP/manifests}"
+  local source_dir="$SOURCE_MANIFEST_DIR"
   local stage_base="${SLURM_TMPDIR:-/tmp}"
   local stage_root="${STAGE_ROOT:-$stage_base/foveatedseg-sa1b-manifests-${USER}-${SLURM_JOB_ID:-$$}-${task}}"
   local names=()
@@ -169,21 +184,23 @@ record_launch_artifacts() {
 
 echo "job_id=$SLURM_JOB_ID host=$(hostname) task=$TASK mode=$MODE nproc_per_node=$NPROC_PER_NODE micro_batches=$MICRO_BATCHES cpus=${SLURM_CPUS_PER_TASK:-unset} workers_per_rank=$WORKERS prefetch=$PREFETCH in_order=$IN_ORDER worker_pre_crop=$WORKER_PRE_CROP effective_batch=$EFFECTIVE_BATCH"
 echo "num_steps=$NUM_STEPS save_every=$SAVE_EVERY milestone_every=$MILESTONE_EVERY log_every=$LOG_EVERY checkpoint_keep_last=$CHECKPOINT_KEEP_LAST wandb_project=${WANDB_PROJECT:-config-default} wandb_mode=$WANDB_MODE"
+echo "resume_from=${RESUME_FROM:-none} fork_from=${FORK_FROM:-none} val_every=${VAL_EVERY:-disabled} val_max_examples=${VAL_MAX_EXAMPLES:-config-default} gpu_type=$GPU_TYPE"
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "repo=$REPO commit=$COMMIT"
 echo "python=$(which python) CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv,noheader
 
+SOURCE_MANIFEST_DIR="${SOURCE_DIR:-$EXP/manifests}"
 SOURCE_MANIFESTS=()
 if [[ "$TASK" == "mae" ]]; then
   SOURCE_MANIFESTS+=(
-    "$EXP/manifests/sa1b_subset_mae_train_images.jsonl"
-    "$EXP/manifests/sa1b_subset_mae_val_images.jsonl"
+    "$SOURCE_MANIFEST_DIR/sa1b_subset_mae_train_images.jsonl"
+    "$SOURCE_MANIFEST_DIR/sa1b_subset_mae_val_images.jsonl"
   )
 else
   SOURCE_MANIFESTS+=(
-    "$EXP/manifests/sa1b_subset_train.jsonl"
-    "$EXP/manifests/sa1b_subset_val.jsonl"
+    "$SOURCE_MANIFEST_DIR/sa1b_subset_train.jsonl"
+    "$SOURCE_MANIFEST_DIR/sa1b_subset_val.jsonl"
   )
 fi
 python scripts/build_jsonl_offsets.py "${SOURCE_MANIFESTS[@]}"
@@ -201,127 +218,42 @@ for MICRO_BATCH in $MICRO_BATCHES; do
   fi
   PROFILE="sa1b_ddp_${TASK}_${GPUS_TAG}_mb${MICRO_BATCH}_eb${EFFECTIVE_BATCH}_wpr${WORKERS}_p${PREFETCH}_io${IN_ORDER}_${MODE}${NUM_STEPS}${PRE_CROP_TAG}${PROFILE_SUFFIX}"
   EFFECTIVE_CONFIG="$EXP/slurm/${PROFILE}_${SLURM_JOB_ID}.json"
-  python - "$BASE_CONFIG" "$EFFECTIVE_CONFIG" "$TASK" "$PROFILE" "$MICRO_BATCH" "$WORKERS" "$PREFETCH" "$IN_ORDER" "$NUM_STEPS" "$STAGED_MANIFEST_ROOT" "$WORKER_PRE_CROP" "$EFFECTIVE_BATCH" "$EXP" "$NPROC_PER_NODE" "$GPUS_TAG" "$SAVE_EVERY" "$MILESTONE_EVERY" "$LOG_EVERY" "$CHECKPOINT_KEEP_LAST" "$WANDB_PROJECT" "$WANDB_RUN_NAME" "$WANDB_MODE" "$MAE_TARGET_BATCH_SCHEDULE" "$MAE_WARMUP_STEPS" "$MAE_BATCH_DOUBLE_EVERY" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-(
-    base,
-    out,
-    task,
-    profile,
-    micro_batch,
-    workers,
-    prefetch,
-    in_order,
-    num_steps,
-    staged,
-    worker_pre_crop,
-    effective_batch,
-    exp,
-    nproc,
-    gpus_tag,
-    save_every,
-    milestone_every,
-    log_every,
-    checkpoint_keep_last,
-    wandb_project,
-    wandb_run_name,
-    wandb_mode,
-    mae_target_batch_schedule,
-    mae_warmup_steps,
-    mae_batch_double_every,
-) = sys.argv[1:]
-config = json.loads(Path(base).read_text())
-root = Path(exp)
-micro_i = int(micro_batch)
-workers_i = int(workers)
-prefetch_i = int(prefetch)
-steps_i = int(num_steps)
-effective_i = int(effective_batch)
-save_every_i = int(save_every)
-milestone_every_i = int(milestone_every)
-log_every_i = int(log_every)
-in_order_b = in_order.lower() == "true"
-worker_pre_crop_b = worker_pre_crop.lower() == "true"
-milestones = list(range(milestone_every_i, steps_i + 1, milestone_every_i)) if milestone_every_i > 0 else []
-if steps_i not in milestones:
-    milestones.append(steps_i)
-run_name = wandb_run_name or f"beacon-ddp-{profile}"
-
-config["runtime"].update(
-    {
-        "output_dir": str(root / "runs" / profile),
-        "profile_name": profile,
-        "distributed": True,
-        "micro_batch_size": micro_i,
-        "num_workers": workers_i,
-        "prefetch_factor": prefetch_i,
-        "dataloader_in_order": in_order_b,
-        "num_steps": steps_i,
-        "save_every": save_every_i,
-        "milestone_steps": milestones,
-        "log_every": log_every_i,
-        "eval_every": None,
-        "checkpoint_keep_last": int(checkpoint_keep_last),
-        "wandb_project": wandb_project or config["runtime"].get("wandb_project", "SegmentThisThingSA1BLogRect"),
-        "wandb_run_name": run_name,
-        "wandb_mode": wandb_mode or config["runtime"].get("wandb_mode", "offline"),
-        "wandb_tags": sorted(
-            set(
-                config["runtime"].get("wandb_tags", [])
-                + [
-                    task,
-                    "ddp",
-                    "sa1b",
-                    gpus_tag,
-                    "fixed-lambda",
-                    "beacon",
-                    "h100",
-                    f"ranks-{int(nproc)}",
-                    f"mb-per-rank-{micro_i}",
-                    f"workers-per-rank-{workers_i}",
-                    f"prefetch-{prefetch_i}",
-                    f"in-order-{int(in_order_b)}",
-                    f"worker-precrop-{int(worker_pre_crop_b)}",
-                    f"steps-{steps_i}",
-                ]
-            )
-        ),
-    }
-)
-if task == "mae":
-    config["mae"]["train_manifest"] = str(Path(staged) / "sa1b_subset_mae_train_images.jsonl")
-    config["mae"]["val_manifest"] = str(Path(staged) / "sa1b_subset_mae_val_images.jsonl")
-    config["mae"]["val_every"] = None
-    config["mae"]["effective_batch_size"] = effective_i
-    if mae_target_batch_schedule:
-        config["mae"]["target_batch_schedule"] = json.loads(mae_target_batch_schedule)
-    elif mae_batch_double_every:
-        interval = int(mae_batch_double_every)
-        if interval <= 0:
-            config["mae"]["target_batch_schedule"] = {"0": effective_i}
-        else:
-            schedule = {}
-            batch = effective_i
-            for schedule_step in range(0, steps_i, interval):
-                schedule[str(schedule_step)] = batch
-                batch *= 2
-            config["mae"]["target_batch_schedule"] = schedule
-    else:
-        config["mae"]["target_batch_schedule"] = {"0": effective_i}
-    if mae_warmup_steps:
-        config["mae"]["warmup_steps"] = int(mae_warmup_steps)
-    config["mae"]["worker_pre_crop"] = worker_pre_crop_b
-else:
-    config["segmentation"]["train_manifest"] = str(Path(staged) / "sa1b_subset_train.jsonl")
-    config["segmentation"]["effective_batch_size"] = effective_i
-    config["segmentation"]["target_batch_schedule"] = {"0": effective_i}
-    config["evaluation"]["named_eval_manifests"]["sa1b_subset_val"] = str(Path(staged) / "sa1b_subset_val.jsonl")
-Path(out).write_text(json.dumps(config, indent=2) + "\n")
-print(out)
-PY
+  python scripts/build_sa1b_ddp_config.py \
+    --base "$BASE_CONFIG" \
+    --output "$EFFECTIVE_CONFIG" \
+    --task "$TASK" \
+    --profile "$PROFILE" \
+    --experiment-root "$EXP" \
+    --staged-manifest-root "$STAGED_MANIFEST_ROOT" \
+    --micro-batch "$MICRO_BATCH" \
+    --effective-batch "$EFFECTIVE_BATCH" \
+    --workers "$WORKERS" \
+    --prefetch "$PREFETCH" \
+    --in-order "$IN_ORDER" \
+    --worker-pre-crop "$WORKER_PRE_CROP" \
+    --num-steps "$NUM_STEPS" \
+    --save-every "$SAVE_EVERY" \
+    --milestone-every "$MILESTONE_EVERY" \
+    --log-every "$LOG_EVERY" \
+    --checkpoint-keep-last "$CHECKPOINT_KEEP_LAST" \
+    --nproc "$NPROC_PER_NODE" \
+    --gpus-tag "$GPUS_TAG" \
+    --gpu-type "$GPU_TYPE" \
+    --wandb-project "$WANDB_PROJECT" \
+    --wandb-run-name "$WANDB_RUN_NAME" \
+    --wandb-mode "$WANDB_MODE" \
+    --resume-from "$RESUME_FROM" \
+    --fork-from "$FORK_FROM" \
+    --val-every "$VAL_EVERY" \
+    --val-max-examples "$VAL_MAX_EXAMPLES" \
+    --target-batch-schedule "$TARGET_BATCH_SCHEDULE" \
+    --batch-double-every "$BATCH_DOUBLE_EVERY" \
+    --warmup-steps "$WARMUP_STEPS" \
+    --views-per-image "$VIEWS_PER_IMAGE" \
+    --max-segments-per-image "$MAX_SEGMENTS_PER_IMAGE" \
+    --pretrained-encoder "$PRETRAINED_ENCODER" \
+    --pretrained-mae-checkpoint "$PRETRAINED_MAE_CHECKPOINT" \
+    --init-checkpoint "$INIT_CHECKPOINT"
 
   echo "DDP_START profile=$PROFILE config=$EFFECTIVE_CONFIG"
   record_launch_artifacts "$PROFILE" "$EFFECTIVE_CONFIG"
